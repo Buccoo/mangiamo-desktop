@@ -3,10 +3,9 @@ import { autoUpdater } from "electron-updater";
 import fs from "node:fs";
 import path from "node:path";
 import type { DesktopPrintWorker as DesktopPrintWorkerType } from "./printWorker";
-import { scanWifiNetworks } from "./printWorker";
-
-const { DesktopPrintWorker } = require("./printWorker.cjs") as {
+const { DesktopPrintWorker, scanWifiNetworks } = require("./printWorker.cjs") as {
   DesktopPrintWorker: typeof DesktopPrintWorkerType;
+  scanWifiNetworks: () => Promise<import("./printWorker").WifiNetwork[]>;
 };
 
 type DesktopRuntimeConfig = {
