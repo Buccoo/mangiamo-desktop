@@ -145,17 +145,17 @@ jobs:
           ENCODED=$(echo "$LATEST_YML" | base64 -w 0)
 
           # Get current file SHA (needed for update)
-          SHA=$(gh api repos/Buccoo/sushiamo-prod/contents/public/downloads/latest.yml \
+          SHA=$(gh api repos/Buccoo/sushiamo-dashboard/contents/public/downloads/latest.yml \
             --jq '.sha' 2>/dev/null || echo "")
 
           if [ -n "$SHA" ]; then
-            gh api repos/Buccoo/sushiamo-prod/contents/public/downloads/latest.yml \
+            gh api repos/Buccoo/sushiamo-dashboard/contents/public/downloads/latest.yml \
               --method PUT \
               -f message="chore: update desktop latest.yml to ${GITHUB_REF_NAME}" \
               -f content="$ENCODED" \
               -f sha="$SHA"
           else
-            gh api repos/Buccoo/sushiamo-prod/contents/public/downloads/latest.yml \
+            gh api repos/Buccoo/sushiamo-dashboard/contents/public/downloads/latest.yml \
               --method PUT \
               -f message="chore: update desktop latest.yml to ${GITHUB_REF_NAME}" \
               -f content="$ENCODED"
