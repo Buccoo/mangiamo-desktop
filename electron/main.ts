@@ -3,6 +3,7 @@ import { autoUpdater } from "electron-updater";
 import fs from "node:fs";
 import path from "node:path";
 import type { DesktopPrintWorker as DesktopPrintWorkerType } from "./printWorker";
+import { scanWifiNetworks } from "./printWorker";
 
 const { DesktopPrintWorker } = require("./printWorker.cjs") as {
   DesktopPrintWorker: typeof DesktopPrintWorkerType;
@@ -1122,6 +1123,9 @@ app
     ipcMain.handle("desktop:printer:stop", async () => {
       if (!printWorker) throw new Error("PRINT_WORKER_UNAVAILABLE");
       return printWorker.stopService();
+    });
+    ipcMain.handle("desktop:wifi:scan-networks", async () => {
+      return scanWifiNetworks();
     });
     ipcMain.handle("desktop:printer:discover", async (_event, payload) => {
       if (!printWorker) throw new Error("PRINT_WORKER_UNAVAILABLE");

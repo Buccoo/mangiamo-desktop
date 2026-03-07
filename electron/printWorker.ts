@@ -1,7 +1,9 @@
+import { exec } from "node:child_process";
 import fs from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import type { BrowserWindow } from "electron";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
@@ -1595,6 +1597,109 @@ export class DesktopPrintWorker {
       scanned_ports: [...RT_DISCOVERY_PORTS],
       devices,
     };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// WiFi network scanning (standalone — no PrintWorkerService state needed)
+// ---------------------------------------------------------------------------
+
+export type WifiNetwork = {
+  ssid: string;
+  signal: number; // 0–100
+  secured: boolean;
+  connected: boolean;
+};
+
+const execAsync = promisify(exec);
+
+async function scanWifiNetworksWindows(): Promise<WifiNetwork[]> {
+  let connectedSsid: string | null = null;
+  try {
+    const { stdout } = await execAsync("netsh wlan show interfaces", { timeout: 5000 });
+    // "SSID                   : Casarano Volley" — avoid matching "BSSID"
+    const m = stdout.match(/^\s{1,20}SSID\s*:\s*(.+)$/m);
+    if (m) connectedSsid = m[1].trim();
+  } catch { /* no WiFi adapter or not connected */ }
+
+  const networks: WifiNetwork[] = [];
+  try {
+    const { stdout } = await execAsync("netsh wlan show networks mode=Bssid", { timeout: 8000 });
+    const blocks = stdout.split(/SSID \d+ :/);
+    for (const block of blocks.slice(1)) {
+      const lines = block.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      const ssid = lines[0]?.trim();
+      if (!ssid) continue;
+      const signalLine = lines.find((l) => l.startsWith("Signal"));
+      const signal = parseInt(signalLine?.match(/(\d+)%/)?.[1] ?? "0", 10);
+      const authLine = lines.find((l) => l.startsWith("Authentication"));
+      const secured = authLine ? !authLine.toLowerCase().includes("open") : true;
+      networks.push({ ssid, signal, secured, connected: ssid === connectedSsid });
+    }
+  } catch { /* no-op */ }
+
+  return networks.sort((a, b) => b.signal - a.signal);
+}
+
+async function scanWifiNetworksMac(): Promise<WifiNetwork[]> {
+  let connectedSsid: string | null = null;
+  try {
+    const { stdout } = await execAsync("networksetup -getairportnetwork en0", { timeout: 5000 });
+    const m = stdout.match(/Current Wi-Fi Network:\s*(.+)/);
+    if (m) connectedSsid = m[1].trim();
+  } catch { /* no-op */ }
+
+  const networks: WifiNetwork[] = [];
+  try {
+    const airport =
+      "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport";
+    const { stdout } = await execAsync(`"${airport}" -s`, { timeout: 10000 });
+    for (const line of stdout.split("\n").slice(1)) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 3) continue;
+      const ssid = parts[0];
+      const rssi = parseInt(parts[2], 10);
+      const signal = Math.max(0, Math.min(100, (rssi + 100) * 2));
+      const secured = line.includes("WPA") || line.includes("WEP");
+      networks.push({ ssid, signal, secured, connected: ssid === connectedSsid });
+    }
+  } catch { /* no-op */ }
+
+  return networks.sort((a, b) => b.signal - a.signal);
+}
+
+async function scanWifiNetworksLinux(): Promise<WifiNetwork[]> {
+  let connectedSsid: string | null = null;
+  const networks: WifiNetwork[] = [];
+  try {
+    const { stdout: activeOut } = await execAsync("nmcli -t -f active,ssid dev wifi list", { timeout: 5000 });
+    const m = activeOut.match(/^yes:(.+)$/m);
+    if (m) connectedSsid = m[1].trim();
+
+    const { stdout } = await execAsync("nmcli -f SSID,SIGNAL,SECURITY dev wifi list", { timeout: 5000 });
+    for (const line of stdout.split("\n").slice(1)) {
+      const parts = line.trim().split(/\s{2,}/);
+      if (parts.length < 2) continue;
+      const ssid = parts[0].trim();
+      if (!ssid || ssid === "--") continue;
+      const signal = parseInt(parts[1], 10) || 0;
+      const secured = !!parts[2] && parts[2] !== "--";
+      if (!networks.find((n) => n.ssid === ssid)) {
+        networks.push({ ssid, signal, secured, connected: ssid === connectedSsid });
+      }
+    }
+  } catch { /* nmcli not available */ }
+
+  return networks.sort((a, b) => b.signal - a.signal);
+}
+
+export async function scanWifiNetworks(): Promise<WifiNetwork[]> {
+  try {
+    if (process.platform === "win32") return await scanWifiNetworksWindows();
+    if (process.platform === "darwin") return await scanWifiNetworksMac();
+    return await scanWifiNetworksLinux();
+  } catch {
+    return [];
   }
 }
 

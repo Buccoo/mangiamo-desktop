@@ -153,6 +153,9 @@ contextBridge.exposeInMainWorld("desktopShell", {
       return () => ipcRenderer.removeListener("desktop:printer-log", handler);
     },
   },
+  wifi: {
+    scanNetworks: () => ipcRenderer.invoke("desktop:wifi:scan-networks"),
+  },
   onDeepLink: (callback: (route: string) => void) => {
     if (typeof callback !== "function") {
       return () => {};
