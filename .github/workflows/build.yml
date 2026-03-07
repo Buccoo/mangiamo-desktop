@@ -137,26 +137,15 @@ jobs:
           name: windows-build
           path: artifacts
 
-      - name: Push latest.yml to sushiamo-prod
+      - name: Push latest.yml to sushiamo-dashboard
         env:
           GH_TOKEN: ${{ secrets.SUSHIAMO_PROD_TOKEN }}
         run: |
-          LATEST_YML=$(cat artifacts/latest.yml)
-          ENCODED=$(echo "$LATEST_YML" | base64 -w 0)
-
-          # Get current file SHA (needed for update)
-          SHA=$(gh api repos/Buccoo/sushiamo-dashboard/contents/public/downloads/latest.yml \
-            --jq '.sha' 2>/dev/null || echo "")
-
-          if [ -n "$SHA" ]; then
-            gh api repos/Buccoo/sushiamo-dashboard/contents/public/downloads/latest.yml \
-              --method PUT \
-              -f message="chore: update desktop latest.yml to ${GITHUB_REF_NAME}" \
-              -f content="$ENCODED" \
-              -f sha="$SHA"
-          else
-            gh api repos/Buccoo/sushiamo-dashboard/contents/public/downloads/latest.yml \
-              --method PUT \
-              -f message="chore: update desktop latest.yml to ${GITHUB_REF_NAME}" \
-              -f content="$ENCODED"
-          fi
+          git clone https://x-access-token:${GH_TOKEN}@github.com/Buccoo/sushiamo-dashboard.git repo-clone
+          cp artifacts/latest.yml repo-clone/public/downloads/latest.yml
+          cd repo-clone
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add public/downloads/latest.yml
+          git diff --cached --quiet || git commit -m "chore: update desktop latest.yml to ${GITHUB_REF_NAME}"
+          git push
