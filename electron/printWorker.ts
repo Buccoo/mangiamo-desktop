@@ -420,11 +420,38 @@ function prettifyDishName(value: unknown) {
     .join(" ");
 }
 
+function renderPinSlip(job: JobRow) {
+  const width = 42;
+  const payload = (job.payload || {}) as Record<string, unknown>;
+  const restaurantName = String(payload.restaurant_name || "").trim() || "Ristorante";
+  const tableLabel = String(payload.table_number || "").trim() || "-";
+  // Extract PIN from first item name (format: "PIN: 1234")
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  const firstItem = (items[0] || {}) as Record<string, unknown>;
+  const pinRaw = String(firstItem.name || "").replace(/^PIN:\s*/i, "").trim();
+  const center = (text: string) => {
+    if (text.length >= width) return text;
+    const pad = Math.floor((width - text.length) / 2);
+    return " ".repeat(pad) + text;
+  };
+  const lines: string[] = [];
+  lines.push(center(restaurantName));
+  lines.push("-".repeat(width));
+  lines.push(`TAVOLO: ${tableLabel.toUpperCase()}`);
+  lines.push(`PIN: ${pinRaw}`);
+  lines.push("-".repeat(width));
+  return lines.join("\n");
+}
+
 function renderTicket(job: JobRow) {
+  const department = normalizeDepartment(
+    (job.payload as Record<string, unknown>)?.department || job.department,
+  );
+  if (department === "pin") return renderPinSlip(job);
+
   const width = 42;
   const payload = (job.payload || {}) as Record<string, unknown>;
   const items = Array.isArray(payload.items) ? payload.items : [];
-  const department = normalizeDepartment(payload.department || job.department);
   const restaurantName = String(payload.restaurant_name || "").trim() || "Ristorante";
   const tableLabel = String(payload.table_number || "").trim() || "-";
   const orderLabel = payload.order_number != null ? `#${String(payload.order_number)}` : "#-";
@@ -505,6 +532,7 @@ function isBoldLine(line: string) {
   const trimmed = line.trim();
   if (!trimmed) return false;
   if (/^tavolo:/i.test(trimmed)) return true;
+  if (/^pin:/i.test(trimmed)) return true;
   if (/^\d+x\s+/i.test(trimmed)) return true;
   return false;
 }
@@ -514,6 +542,10 @@ function getLinePrintSize(line: string) {
   if (!trimmed) return 0x00;
   if (/^tavolo:/i.test(trimmed)) {
     // Double width + double height for table.
+    return 0x11;
+  }
+  if (/^pin:/i.test(trimmed)) {
+    // Double width + double height for PIN slip.
     return 0x11;
   }
   if (/^\d+x\s+/i.test(trimmed)) {
