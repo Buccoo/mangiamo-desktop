@@ -121,6 +121,8 @@ contextBridge.exposeInMainWorld("desktopShell", {
   checkForUpdates: () => ipcRenderer.invoke("desktop:check-for-updates"),
   downloadUpdate: () => ipcRenderer.invoke("desktop:download-update"),
   installUpdate: () => ipcRenderer.invoke("desktop:install-update"),
+  downloadInstallerFallback: () => ipcRenderer.invoke("desktop:download-installer-fallback"),
+  installDownloadedInstallerFallback: () => ipcRenderer.invoke("desktop:install-downloaded-installer-fallback"),
   printer: {
     getState: () => ipcRenderer.invoke("desktop:printer:get-state"),
     saveConfig: (payload: PrinterWorkerConfigPayload) => ipcRenderer.invoke("desktop:printer:save-config", payload || {}),

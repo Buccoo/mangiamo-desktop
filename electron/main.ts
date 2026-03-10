@@ -1,7 +1,9 @@
 import { app, BrowserWindow, ipcMain, Menu, shell } from "electron";
 import { autoUpdater } from "electron-updater";
 import fs from "node:fs";
+import https from "node:https";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import type { DesktopPrintWorker as DesktopPrintWorkerType } from "./printWorker";
 const { DesktopPrintWorker, scanWifiNetworks } = require("./printWorker.cjs") as {
   DesktopPrintWorker: typeof DesktopPrintWorkerType;
@@ -24,6 +26,9 @@ type DesktopUpdateEventPayload = {
     | "update-not-available"
     | "download-progress"
     | "update-downloaded"
+    | "installer-download-progress"
+    | "installer-downloaded"
+    | "installer-install-started"
     | "error";
   data?: Record<string, unknown>;
 };
@@ -56,6 +61,7 @@ const DEV_SERVER_URL = process.env.ELECTRON_DEV_SERVER_URL;
 const WINDOW_ICON_NAME = "favicon.png";
 const DEFAULT_UPDATE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
 const MIN_UPDATE_CHECK_INTERVAL_MS = 2 * 60 * 1000;
+const GITHUB_RELEASES_BASE = "https://github.com/Buccoo/sushiamo-desktop/releases/latest/download";
 
 let mainWindow: BrowserWindow | null = null;
 let pendingDeepLinkRoute: string | null = null;
@@ -75,6 +81,8 @@ let desktopUpdateListenersBound = false;
 let desktopUpdateFeedCandidates: string[] = [];
 let desktopUpdateFeedIndex = 0;
 let desktopUpdateIntervalHandle: NodeJS.Timeout | null = null;
+let fallbackInstallerDownloadInProgress = false;
+let fallbackInstallerDownloadedPath: string | null = null;
 
 function getCredentialsPath() {
   return path.join(app.getPath("userData"), CREDENTIALS_FILE);
@@ -254,6 +262,182 @@ function emitDesktopUpdateEvent(payload: DesktopUpdateEventPayload) {
     mainWindow.webContents.send("desktop:update-event", payload);
   } catch {
     // ignore renderer emit failures
+  }
+}
+
+function resolveFallbackInstallerAsset() {
+  if (process.platform === "darwin") {
+    const isArm = process.arch === "arm64";
+    return {
+      fileName: isArm ? "SushiAMO-Desktop-macOS-arm64.dmg" : "SushiAMO-Desktop-macOS-x64.dmg",
+      url: `${GITHUB_RELEASES_BASE}/${isArm ? "SushiAMO-Desktop-macOS-arm64.dmg" : "SushiAMO-Desktop-macOS-x64.dmg"}`,
+    };
+  }
+
+  return {
+    fileName: "SushiAMO-Desktop-Setup.exe",
+    url: `${GITHUB_RELEASES_BASE}/SushiAMO-Desktop-Setup.exe`,
+  };
+}
+
+async function downloadWithRedirects(url: string, destinationPath: string, redirectLimit = 5): Promise<void> {
+  await fs.promises.mkdir(path.dirname(destinationPath), { recursive: true });
+
+  await new Promise<void>((resolve, reject) => {
+    const request = https.get(
+      url,
+      {
+        headers: {
+          "User-Agent": "SushiAMO-Desktop-Updater",
+          Accept: "application/octet-stream,*/*",
+        },
+      },
+      (response) => {
+        const statusCode = Number(response.statusCode || 0);
+
+        if (statusCode >= 300 && statusCode < 400 && response.headers.location) {
+          response.resume();
+          if (redirectLimit <= 0) {
+            reject(new Error("FALLBACK_DOWNLOAD_TOO_MANY_REDIRECTS"));
+            return;
+          }
+          const redirectedUrl = new URL(response.headers.location, url).toString();
+          void downloadWithRedirects(redirectedUrl, destinationPath, redirectLimit - 1).then(resolve).catch(reject);
+          return;
+        }
+
+        if (statusCode < 200 || statusCode >= 300) {
+          response.resume();
+          reject(new Error(`FALLBACK_DOWNLOAD_HTTP_${statusCode}`));
+          return;
+        }
+
+        const total = Number(response.headers["content-length"] || 0);
+        let transferred = 0;
+        const output = fs.createWriteStream(destinationPath);
+
+        response.on("data", (chunk: Buffer) => {
+          transferred += chunk.length;
+          const percent = total > 0 ? Math.max(0, Math.min(100, (transferred / total) * 100)) : null;
+          emitDesktopUpdateEvent({
+            type: "installer-download-progress",
+            data: {
+              transferred,
+              total: total || undefined,
+              percent: percent ?? undefined,
+            },
+          });
+        });
+
+        output.on("finish", () => {
+          output.close(() => resolve());
+        });
+
+        output.on("error", (error) => {
+          output.destroy();
+          reject(error);
+        });
+
+        response.on("error", (error) => {
+          output.destroy(error);
+          reject(error);
+        });
+
+        response.pipe(output);
+      },
+    );
+
+    request.on("error", (error) => reject(error));
+  });
+}
+
+async function downloadFallbackInstallerAsset() {
+  if (fallbackInstallerDownloadInProgress) {
+    return {
+      ok: false,
+      reason: "DOWNLOAD_ALREADY_IN_PROGRESS",
+    };
+  }
+
+  fallbackInstallerDownloadInProgress = true;
+  const { fileName, url } = resolveFallbackInstallerAsset();
+  const targetPath = path.join(app.getPath("temp"), "sushiamo-desktop-updates", fileName);
+
+  try {
+    await downloadWithRedirects(url, targetPath);
+    fallbackInstallerDownloadedPath = targetPath;
+    emitDesktopUpdateEvent({
+      type: "installer-downloaded",
+      data: { filePath: targetPath },
+    });
+    return {
+      ok: true,
+      filePath: targetPath,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    emitDesktopUpdateEvent({
+      type: "error",
+      data: { message },
+    });
+    return {
+      ok: false,
+      error: message,
+    };
+  } finally {
+    fallbackInstallerDownloadInProgress = false;
+  }
+}
+
+async function installFallbackInstallerAsset() {
+  const installerPath = fallbackInstallerDownloadedPath;
+  if (!installerPath) {
+    return {
+      ok: false,
+      reason: "INSTALLER_NOT_DOWNLOADED",
+    };
+  }
+
+  if (!fs.existsSync(installerPath)) {
+    fallbackInstallerDownloadedPath = null;
+    return {
+      ok: false,
+      reason: "INSTALLER_FILE_MISSING",
+    };
+  }
+
+  try {
+    emitDesktopUpdateEvent({
+      type: "installer-install-started",
+      data: { filePath: installerPath },
+    });
+
+    if (process.platform === "win32") {
+      const child = spawn(installerPath, [], {
+        detached: true,
+        stdio: "ignore",
+      });
+      child.unref();
+    } else {
+      const opened = await shell.openPath(installerPath);
+      if (opened) {
+        return {
+          ok: false,
+          reason: opened,
+        };
+      }
+    }
+
+    setTimeout(() => {
+      app.quit();
+    }, 300);
+
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
   }
 }
 
@@ -1099,6 +1283,12 @@ app
       return {
         ok: true,
       };
+    });
+    ipcMain.handle("desktop:download-installer-fallback", async () => {
+      return downloadFallbackInstallerAsset();
+    });
+    ipcMain.handle("desktop:install-downloaded-installer-fallback", async () => {
+      return installFallbackInstallerAsset();
     });
     ipcMain.handle("desktop:printer:get-state", async () => {
       return printWorker?.getPublicState() || null;
