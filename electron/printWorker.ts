@@ -254,7 +254,7 @@ function buildEpsonFiscalReceiptXml(payload: Record<string, unknown>) {
   const paymentMethod = normalizePaymentMethod(payload?.payment_method);
   const paymentLabel = paymentMethod === "card" ? "ELETTRONICO" : "CONTANTI";
   const cents = Math.max(1, toCents(payload?.total_amount));
-  const description = `Sushiamo Tavolo ${tableNumber}`;
+  const description = `Mangiamo Tavolo ${tableNumber}`;
 
   return (
     `<?xml version="1.0" encoding="UTF-8"?>\n` +
@@ -279,7 +279,7 @@ function buildNonFiscalTestXml() {
     `  <printNormal data="   SCONTRINO DI PROVA"/>\n` +
     `  <printNormal data="   TEST RECEIPT"/>\n` +
     `  <printNormal data=""/>\n` +
-    `  <printNormal data="   SushiAMO Desktop"/>\n` +
+    `  <printNormal data="   Mangiamo Desktop"/>\n` +
     `  <printNormal data="   Connessione OK"/>\n` +
     `  <printNormal data="   ${dateStr}  ${timeStr}"/>\n` +
     `  <printNormal data="================================"/>\n` +

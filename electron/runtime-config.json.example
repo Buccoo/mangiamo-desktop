@@ -4,5 +4,5 @@
   "VITE_ROUTER_MODE": "hash",
   "SUSHIAMO_DESKTOP_ENABLE_AUTO_UPDATE": "1",
   "SUSHIAMO_DESKTOP_UPDATE_URL": "https://github.com/Buccoo/sushiamo-desktop/releases/latest/download",
-  "PUBLIC_APP_URL": "https://business.sushiamo.app"
+  "PUBLIC_APP_URL": "https://business.mangiamo.app"
 }

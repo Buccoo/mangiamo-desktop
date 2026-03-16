@@ -51,7 +51,7 @@ async function main() {
     SUSHIAMO_DESKTOP_ENABLE_AUTO_UPDATE:
       String(env.SUSHIAMO_DESKTOP_ENABLE_AUTO_UPDATE || "1").trim() || "1",
     SUSHIAMO_DESKTOP_UPDATE_URL:
-      String(env.SUSHIAMO_DESKTOP_UPDATE_URL || "https://www.sushiamo.app/downloads").trim(),
+      String(env.SUSHIAMO_DESKTOP_UPDATE_URL || "https://www.mangiamo.app/downloads").trim(),
     PUBLIC_APP_URL: String(env.PUBLIC_APP_URL || env.SUSHIAMO_PUBLIC_APP_URL || "").trim(),
   };
 

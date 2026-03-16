@@ -13,17 +13,17 @@
     "build:mac:arm64": "npm run prepare-config && npm run build:ts && electron-builder --mac dmg --arm64 --publish never",
     "build:mac:x64": "npm run prepare-config && npm run build:ts && electron-builder --mac dmg --x64 --publish never",
     "build:mac:unsigned": "npm run prepare-config && npm run build:ts && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dmg --x64 --arm64 --publish never",
-    "dev": "npm run prepare-config && concurrently -k -n TS,ELECTRON \"npm run watch:ts\" \"wait-on electron-dist/main.cjs && cross-env ELECTRON_DEV_SERVER_URL=https://dashboard.sushiamo.app node scripts/desktop/run-electron-dev.mjs\""
+    "dev": "npm run prepare-config && concurrently -k -n TS,ELECTRON \"npm run watch:ts\" \"wait-on electron-dist/main.cjs && cross-env ELECTRON_DEV_SERVER_URL=https://dashboard.mangiamo.app node scripts/desktop/run-electron-dev.mjs\""
   },
   "build": {
     "appId": "online.tattica.sushiamo.desktop",
-    "productName": "SushiAMO Desktop",
+    "productName": "Mangiamo Desktop",
     "asar": true,
     "compression": "maximum",
     "publish": [
       {
         "provider": "generic",
-        "url": "https://www.sushiamo.app/downloads"
+        "url": "https://www.mangiamo.app/downloads"
       }
     ],
     "directories": {
@@ -49,14 +49,14 @@
         "nsis"
       ],
       "icon": "assets/favicon.png",
-      "artifactName": "SushiAMO-Desktop-Setup.${ext}"
+      "artifactName": "Mangiamo-Desktop-Setup.${ext}"
     },
     "mac": {
       "target": [
         "dmg"
       ],
       "icon": "assets/favicon.png",
-      "artifactName": "SushiAMO-Desktop-macOS-${arch}.${ext}",
+      "artifactName": "Mangiamo-Desktop-macOS-${arch}.${ext}",
       "category": "public.app-category.business",
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
@@ -66,7 +66,7 @@
     },
     "protocols": [
       {
-        "name": "SushiAMO Deep Link",
+        "name": "Mangiamo Deep Link",
         "schemes": [
           "sushiamo"
         ]

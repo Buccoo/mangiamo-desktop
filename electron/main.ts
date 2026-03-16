@@ -269,14 +269,14 @@ function resolveFallbackInstallerAsset() {
   if (process.platform === "darwin") {
     const isArm = process.arch === "arm64";
     return {
-      fileName: isArm ? "SushiAMO-Desktop-macOS-arm64.dmg" : "SushiAMO-Desktop-macOS-x64.dmg",
-      url: `${GITHUB_RELEASES_BASE}/${isArm ? "SushiAMO-Desktop-macOS-arm64.dmg" : "SushiAMO-Desktop-macOS-x64.dmg"}`,
+      fileName: isArm ? "Mangiamo-Desktop-macOS-arm64.dmg" : "Mangiamo-Desktop-macOS-x64.dmg",
+      url: `${GITHUB_RELEASES_BASE}/${isArm ? "Mangiamo-Desktop-macOS-arm64.dmg" : "Mangiamo-Desktop-macOS-x64.dmg"}`,
     };
   }
 
   return {
-    fileName: "SushiAMO-Desktop-Setup.exe",
-    url: `${GITHUB_RELEASES_BASE}/SushiAMO-Desktop-Setup.exe`,
+    fileName: "Mangiamo-Desktop-Setup.exe",
+    url: `${GITHUB_RELEASES_BASE}/Mangiamo-Desktop-Setup.exe`,
   };
 }
 
@@ -288,7 +288,7 @@ async function downloadWithRedirects(url: string, destinationPath: string, redir
       url,
       {
         headers: {
-          "User-Agent": "SushiAMO-Desktop-Updater",
+          "User-Agent": "Mangiamo-Desktop-Updater",
           Accept: "application/octet-stream,*/*",
         },
       },
@@ -460,7 +460,7 @@ async function showRendererFallback(win: BrowserWindow, reason: string, details?
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>SushiAMO Desktop - Errore caricamento</title>
+  <title>Mangiamo Desktop - Errore caricamento</title>
   <style>
     body { font-family: Segoe UI, Arial, sans-serif; background: #0b1220; color: #eef2ff; margin: 0; padding: 20px; }
     .card { max-width: 920px; margin: 20px auto; background: #111a2b; border: 1px solid #24314f; border-radius: 12px; padding: 18px; }
@@ -472,7 +472,7 @@ async function showRendererFallback(win: BrowserWindow, reason: string, details?
 </head>
 <body>
   <div class="card">
-    <h1>SushiAMO Desktop: errore caricamento</h1>
+    <h1>Mangiamo Desktop: errore caricamento</h1>
     <div class="muted">La finestra principale non si e caricata correttamente.</div>
     <div><strong>Motivo:</strong> ${escapeHtml(reason)}</div>
     <div style="margin-top:8px;"><strong>Log file:</strong> ${escapeHtml(logPath)}</div>
@@ -676,11 +676,11 @@ function setupApplicationMenu() {
     label: "Invia log al supporto...",
     click: async () => {
       const logPath = getLogFilePath() || "non disponibile";
-      const subject = encodeURIComponent(`[SushiAMO Desktop v${appVersion}] Segnalazione problema`);
+      const subject = encodeURIComponent(`[Mangiamo Desktop v${appVersion}] Segnalazione problema`);
       const body = encodeURIComponent(
         `Salve,\n\nDescrivi qui il problema riscontrato:\n\n\n---\nVersione app: ${appVersion}\nSistema: ${process.platform} ${process.arch}\nFile di log: ${logPath}\n\nAllega il file di log alla email (aprilo con "Apri cartella log" dal menu Aiuto).`,
       );
-      await shell.openExternal(`mailto:sviluppo@sushiamo.app?subject=${subject}&body=${body}`);
+      await shell.openExternal(`mailto:sviluppo@mangiamo.app?subject=${subject}&body=${body}`);
     },
   };
 
@@ -706,7 +706,7 @@ function setupApplicationMenu() {
     {
       label: "App",
       submenu: [
-        { label: `SushiAMO Desktop v${appVersion}`, enabled: false },
+        { label: `Mangiamo Desktop v${appVersion}`, enabled: false },
         { type: "separator" as const },
         {
           label: "Aggiorna pagina",
@@ -731,7 +731,7 @@ function setupApplicationMenu() {
         {
           label: "Documentazione online",
           click: async () => {
-            await shell.openExternal("https://sushiamo.app/gestionale");
+            await shell.openExternal("https://mangiamo.app/gestionale");
           },
         },
       ],
@@ -801,8 +801,8 @@ function setupAutoUpdaterScaffold() {
   const feedCandidates = [
     explicitUpdateUrl,
     derivedFromPublicApp,
-    "https://www.sushiamo.app/downloads",
-    "https://sushiamo.app/downloads",
+    "https://www.mangiamo.app/downloads",
+    "https://mangiamo.app/downloads",
   ]
     .map((value) => String(value || "").trim().replace(/\/+$/, ""))
     .filter(Boolean);
