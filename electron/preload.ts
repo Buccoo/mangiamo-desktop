@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+﻿import { contextBridge, ipcRenderer } from "electron";
 
 type RuntimeConfig = {
   VITE_SUPABASE_URL?: string;
@@ -25,9 +25,9 @@ type RendererLikeGlobal = {
 };
 
 function readInjectedConfig(): RuntimeConfig {
-  const arg = process.argv.find((value) => value.startsWith("--sushiamo-desktop-config="));
+  const arg = process.argv.find((value) => value.startsWith("--mangiamo-desktop-config="));
   if (!arg) return {};
-  const encoded = arg.slice("--sushiamo-desktop-config=".length);
+  const encoded = arg.slice("--mangiamo-desktop-config=".length);
   if (!encoded) return {};
   try {
     const decoded = Buffer.from(encoded, "base64").toString("utf8");
@@ -101,7 +101,7 @@ if (consoleRef?.warn) {
   };
 }
 
-contextBridge.exposeInMainWorld("__SUSHIAMO_DESKTOP_CONFIG__", runtimeConfig);
+contextBridge.exposeInMainWorld("__MANGIAMO_DESKTOP_CONFIG__", runtimeConfig);
 
 contextBridge.exposeInMainWorld("desktopShell", {
   isDesktop: true,

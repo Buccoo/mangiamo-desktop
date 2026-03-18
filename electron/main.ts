@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, shell } from "electron";
+﻿import { app, BrowserWindow, ipcMain, Menu, shell } from "electron";
 import { autoUpdater } from "electron-updater";
 import fs from "node:fs";
 import https from "node:https";
@@ -14,8 +14,8 @@ type DesktopRuntimeConfig = {
   VITE_SUPABASE_URL: string;
   VITE_SUPABASE_ANON_KEY: string;
   VITE_ROUTER_MODE: "browser" | "hash" | string;
-  SUSHIAMO_DESKTOP_ENABLE_AUTO_UPDATE: "0" | "1" | string;
-  SUSHIAMO_DESKTOP_UPDATE_URL?: string;
+  MANGIAMO_DESKTOP_ENABLE_AUTO_UPDATE: "0" | "1" | string;
+  MANGIAMO_DESKTOP_UPDATE_URL?: string;
   PUBLIC_APP_URL?: string;
 };
 
@@ -52,7 +52,7 @@ type SavedDesktopAccountsFile = {
   accounts: SavedDesktopAccount[];
 };
 
-const DESKTOP_PROTOCOL = "sushiamo";
+const DESKTOP_PROTOCOL = "mangiamo";
 const WINDOW_STATE_FILE = "window-state.json";
 const CREDENTIALS_FILE = "desktop-credentials.json";
 const LOG_DIR = "logs";
@@ -61,7 +61,7 @@ const DEV_SERVER_URL = process.env.ELECTRON_DEV_SERVER_URL;
 const WINDOW_ICON_NAME = "favicon.png";
 const DEFAULT_UPDATE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
 const MIN_UPDATE_CHECK_INTERVAL_MS = 2 * 60 * 1000;
-const GITHUB_RELEASES_BASE = "https://github.com/Buccoo/sushiamo-desktop/releases/latest/download";
+const GITHUB_RELEASES_BASE = "https://github.com/Buccoo/mangiamo-desktop/releases/latest/download";
 
 let mainWindow: BrowserWindow | null = null;
 let pendingDeepLinkRoute: string | null = null;
@@ -361,7 +361,7 @@ async function downloadFallbackInstallerAsset() {
 
   fallbackInstallerDownloadInProgress = true;
   const { fileName, url } = resolveFallbackInstallerAsset();
-  const targetPath = path.join(app.getPath("temp"), "sushiamo-desktop-updates", fileName);
+  const targetPath = path.join(app.getPath("temp"), "mangiamo-desktop-updates", fileName);
 
   try {
     await downloadWithRedirects(url, targetPath);
@@ -527,10 +527,10 @@ function loadDesktopRuntimeConfig(): DesktopRuntimeConfig {
     VITE_SUPABASE_URL: String(process.env.VITE_SUPABASE_URL || "").trim(),
     VITE_SUPABASE_ANON_KEY: String(process.env.VITE_SUPABASE_ANON_KEY || "").trim(),
     VITE_ROUTER_MODE: String(process.env.VITE_ROUTER_MODE || "hash").trim() || "hash",
-    SUSHIAMO_DESKTOP_ENABLE_AUTO_UPDATE:
-      String(process.env.SUSHIAMO_DESKTOP_ENABLE_AUTO_UPDATE || "0").trim() || "0",
-    SUSHIAMO_DESKTOP_UPDATE_URL: String(process.env.SUSHIAMO_DESKTOP_UPDATE_URL || "").trim(),
-    PUBLIC_APP_URL: String(process.env.PUBLIC_APP_URL || process.env.SUSHIAMO_PUBLIC_APP_URL || "").trim(),
+    MANGIAMO_DESKTOP_ENABLE_AUTO_UPDATE:
+      String(process.env.MANGIAMO_DESKTOP_ENABLE_AUTO_UPDATE || "0").trim() || "0",
+    MANGIAMO_DESKTOP_UPDATE_URL: String(process.env.MANGIAMO_DESKTOP_UPDATE_URL || "").trim(),
+    PUBLIC_APP_URL: String(process.env.PUBLIC_APP_URL || process.env.MANGIAMO_PUBLIC_APP_URL || "").trim(),
   };
 
   const candidates = app.isPackaged
@@ -571,7 +571,7 @@ function parseDeepLinkRoute(rawUrl: string): string | null {
     const url = new URL(rawUrl);
     if (url.protocol !== `${DESKTOP_PROTOCOL}:`) return null;
 
-    // Expected: sushiamo://join/<token>
+    // Expected: mangiamo://join/<token>
     if (url.hostname.toLowerCase() === "join") {
       const token = url.pathname.split("/").filter(Boolean)[0];
       if (token) return `/join/${encodeURIComponent(token)}`;
@@ -649,7 +649,7 @@ function setupApplicationMenu() {
     label: "Controlla aggiornamenti",
     click: async () => {
       if (!desktopAutoUpdateEnabled) {
-        await shell.openExternal("https://github.com/Buccoo/sushiamo-desktop/releases/latest");
+        await shell.openExternal("https://github.com/Buccoo/mangiamo-desktop/releases/latest");
         return;
       }
       try {
@@ -743,7 +743,7 @@ function setupApplicationMenu() {
 }
 
 function getUpdateCheckIntervalMs() {
-  const envValue = Number(process.env.SUSHIAMO_DESKTOP_UPDATE_CHECK_INTERVAL_MS || "");
+  const envValue = Number(process.env.MANGIAMO_DESKTOP_UPDATE_CHECK_INTERVAL_MS || "");
   const resolved = Number.isFinite(envValue) && envValue > 0 ? envValue : DEFAULT_UPDATE_CHECK_INTERVAL_MS;
   return Math.max(MIN_UPDATE_CHECK_INTERVAL_MS, resolved);
 }
@@ -788,14 +788,14 @@ function stopDesktopAutoUpdatePolling() {
 
 function setupAutoUpdaterScaffold() {
   desktopAutoUpdateEnabled =
-    String(runtimeConfig.SUSHIAMO_DESKTOP_ENABLE_AUTO_UPDATE || "0") === "1" && app.isPackaged;
+    String(runtimeConfig.MANGIAMO_DESKTOP_ENABLE_AUTO_UPDATE || "0") === "1" && app.isPackaged;
   if (!desktopAutoUpdateEnabled) return;
 
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
   autoUpdater.logger = null;
 
-  const explicitUpdateUrl = String(runtimeConfig.SUSHIAMO_DESKTOP_UPDATE_URL || "").trim();
+  const explicitUpdateUrl = String(runtimeConfig.MANGIAMO_DESKTOP_UPDATE_URL || "").trim();
   const publicAppUrl = String(runtimeConfig.PUBLIC_APP_URL || "").trim().replace(/\/+$/, "");
   const derivedFromPublicApp = publicAppUrl ? `${publicAppUrl}/downloads` : "";
   const feedCandidates = [
@@ -990,7 +990,7 @@ async function createMainWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
-      additionalArguments: [`--sushiamo-desktop-config=${desktopConfigEncoded}`],
+      additionalArguments: [`--mangiamo-desktop-config=${desktopConfigEncoded}`],
     },
   });
 

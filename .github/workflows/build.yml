@@ -13,7 +13,7 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-      - name: Checkout sushiamo-desktop
+      - name: Checkout mangiamo-desktop
         uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
@@ -53,7 +53,7 @@ jobs:
   build-mac:
     runs-on: macos-latest
     steps:
-      - name: Checkout sushiamo-desktop
+      - name: Checkout mangiamo-desktop
         uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
@@ -137,11 +137,11 @@ jobs:
           name: windows-build
           path: artifacts
 
-      - name: Push latest.yml to sushiamo-dashboard
+      - name: Push latest.yml to mangiamo-dashboard
         env:
           GH_TOKEN: ${{ secrets.SUSHIAMO_PROD_TOKEN }}
         run: |
-          git clone https://x-access-token:${GH_TOKEN}@github.com/Buccoo/sushiamo-dashboard.git repo-clone
+          git clone https://x-access-token:${GH_TOKEN}@github.com/Buccoo/mangiamo-dashboard.git repo-clone
           cp artifacts/latest.yml repo-clone/public/downloads/latest.yml
           cd repo-clone
           git config user.email "github-actions[bot]@users.noreply.github.com"

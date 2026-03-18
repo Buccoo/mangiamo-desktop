@@ -48,14 +48,14 @@
       "target": [
         "nsis"
       ],
-      "icon": "assets/favicon.png",
+      "icon": "assets/icon.png",
       "artifactName": "Mangiamo-Desktop-Setup.${ext}"
     },
     "mac": {
       "target": [
         "dmg"
       ],
-      "icon": "assets/favicon.png",
+      "icon": "assets/icon.png",
       "artifactName": "Mangiamo-Desktop-macOS-${arch}.${ext}",
       "category": "public.app-category.business",
       "hardenedRuntime": true,
