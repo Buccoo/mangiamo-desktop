@@ -137,11 +137,11 @@ jobs:
           name: windows-build
           path: artifacts
 
-      - name: Push latest.yml to mangiamo-dashboard
+      - name: Push latest.yml to mangiamo-manager
         env:
           GH_TOKEN: ${{ secrets.SUSHIAMO_PROD_TOKEN }}
         run: |
-          git clone https://x-access-token:${GH_TOKEN}@github.com/Buccoo/mangiamo-dashboard.git repo-clone
+          git clone https://x-access-token:${GH_TOKEN}@github.com/Buccoo/mangiamo-manager.git repo-clone
           cp artifacts/latest.yml repo-clone/public/downloads/latest.yml
           cd repo-clone
           git config user.email "github-actions[bot]@users.noreply.github.com"
