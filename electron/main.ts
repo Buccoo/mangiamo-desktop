@@ -1308,6 +1308,17 @@ app
       }
       try {
         await autoUpdater.downloadUpdate();
+        if (!desktopUpdateDownloaded) {
+          desktopUpdateAvailable = true;
+          desktopUpdateDownloaded = true;
+          desktopUpdateCheckInProgress = false;
+          emitDesktopUpdateEvent({
+            type: "update-downloaded",
+            data: {
+              version: desktopUpdateInfo?.version || null,
+            },
+          });
+        }
         return {
           ok: true,
         };
