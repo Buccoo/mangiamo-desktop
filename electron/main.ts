@@ -266,17 +266,49 @@ function emitDesktopUpdateEvent(payload: DesktopUpdateEventPayload) {
 }
 
 function resolveFallbackInstallerAsset() {
+  const explicitUpdateUrl = String(runtimeConfig.MANGIAMO_DESKTOP_UPDATE_URL || "").trim();
+  const publicAppUrl = String(runtimeConfig.PUBLIC_APP_URL || "").trim().replace(/\/+$/, "");
+  const publicDownloadsBase = publicAppUrl
+    ? publicAppUrl.endsWith("/downloads")
+      ? publicAppUrl
+      : `${publicAppUrl}/downloads`
+    : "";
+
   if (process.platform === "darwin") {
     const isArm = process.arch === "arm64";
+    const fileName = isArm ? "Mangiamo-Desktop-macOS-arm64.dmg" : "Mangiamo-Desktop-macOS-x64.dmg";
+    const candidates = [
+      ...desktopUpdateFeedCandidates,
+      explicitUpdateUrl,
+      publicDownloadsBase,
+      GITHUB_RELEASES_BASE,
+    ]
+      .map((value) => String(value || "").trim().replace(/\/+$/, ""))
+      .filter(Boolean)
+      .map((baseUrl) =>
+        /\.(dmg|exe)$/i.test(baseUrl) ? baseUrl : `${baseUrl}/${fileName}`,
+      );
+
     return {
-      fileName: isArm ? "Mangiamo-Desktop-macOS-arm64.dmg" : "Mangiamo-Desktop-macOS-x64.dmg",
-      url: `${GITHUB_RELEASES_BASE}/${isArm ? "Mangiamo-Desktop-macOS-arm64.dmg" : "Mangiamo-Desktop-macOS-x64.dmg"}`,
+      fileName,
+      urls: [...new Set(candidates)],
     };
   }
 
+  const fileName = "Mangiamo-Desktop-Setup.exe";
+  const candidates = [
+    ...desktopUpdateFeedCandidates,
+    explicitUpdateUrl,
+    publicDownloadsBase,
+    GITHUB_RELEASES_BASE,
+  ]
+    .map((value) => String(value || "").trim().replace(/\/+$/, ""))
+    .filter(Boolean)
+    .map((baseUrl) => (/\.(dmg|exe)$/i.test(baseUrl) ? baseUrl : `${baseUrl}/${fileName}`));
+
   return {
-    fileName: "Mangiamo-Desktop-Setup.exe",
-    url: `${GITHUB_RELEASES_BASE}/Mangiamo-Desktop-Setup.exe`,
+    fileName,
+    urls: [...new Set(candidates)],
   };
 }
 
@@ -360,15 +392,38 @@ async function downloadFallbackInstallerAsset() {
   }
 
   fallbackInstallerDownloadInProgress = true;
-  const { fileName, url } = resolveFallbackInstallerAsset();
+  const { fileName, urls } = resolveFallbackInstallerAsset();
   const targetPath = path.join(app.getPath("temp"), "mangiamo-desktop-updates", fileName);
 
   try {
-    await downloadWithRedirects(url, targetPath);
+    const attemptedErrors: string[] = [];
+    let downloadedFrom: string | null = null;
+
+    for (const url of urls) {
+      try {
+        await downloadWithRedirects(url, targetPath);
+        downloadedFrom = url;
+        break;
+      } catch (error) {
+        attemptedErrors.push(`${url} => ${error instanceof Error ? error.message : String(error)}`);
+        try {
+          if (fs.existsSync(targetPath)) {
+            await fs.promises.unlink(targetPath);
+          }
+        } catch {
+          // ignore cleanup errors
+        }
+      }
+    }
+
+    if (!downloadedFrom) {
+      throw new Error(attemptedErrors[0] || "FALLBACK_DOWNLOAD_NO_CANDIDATE_SUCCEEDED");
+    }
+
     fallbackInstallerDownloadedPath = targetPath;
     emitDesktopUpdateEvent({
       type: "installer-downloaded",
-      data: { filePath: targetPath },
+      data: { filePath: targetPath, sourceUrl: downloadedFrom },
     });
     return {
       ok: true,
