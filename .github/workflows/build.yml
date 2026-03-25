@@ -35,7 +35,9 @@ jobs:
         env:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          MANGIAMO_DESKTOP_UPDATE_URL: ${{ vars.DESKTOP_UPDATE_URL }}
           SUSHIAMO_DESKTOP_UPDATE_URL: ${{ vars.DESKTOP_UPDATE_URL }}
+          MANGIAMO_DESKTOP_ENABLE_AUTO_UPDATE: "1"
           SUSHIAMO_DESKTOP_ENABLE_AUTO_UPDATE: "1"
           PUBLIC_APP_URL: https://manager.mangiamo.app
 
@@ -74,7 +76,9 @@ jobs:
         env:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          MANGIAMO_DESKTOP_UPDATE_URL: ${{ vars.DESKTOP_UPDATE_URL }}
           SUSHIAMO_DESKTOP_UPDATE_URL: ${{ vars.DESKTOP_UPDATE_URL }}
+          MANGIAMO_DESKTOP_ENABLE_AUTO_UPDATE: "1"
           SUSHIAMO_DESKTOP_ENABLE_AUTO_UPDATE: "1"
           PUBLIC_APP_URL: https://manager.mangiamo.app
 

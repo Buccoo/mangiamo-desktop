@@ -801,8 +801,7 @@ function setupAutoUpdaterScaffold() {
   const feedCandidates = [
     explicitUpdateUrl,
     derivedFromPublicApp,
-    "https://www.mangiamo.app/downloads",
-    "https://mangiamo.app/downloads",
+    "https://github.com/Buccoo/mangiamo-desktop/releases/latest/download",
   ]
     .map((value) => String(value || "").trim().replace(/\/+$/, ""))
     .filter(Boolean);

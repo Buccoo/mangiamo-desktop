@@ -23,7 +23,7 @@
     "publish": [
       {
         "provider": "generic",
-        "url": "https://www.mangiamo.app/downloads"
+        "url": "https://github.com/Buccoo/mangiamo-desktop/releases/latest/download"
       }
     ],
     "directories": {

@@ -48,10 +48,10 @@ async function main() {
     VITE_SUPABASE_URL: String(env.VITE_SUPABASE_URL || "").trim(),
     VITE_SUPABASE_ANON_KEY: String(env.VITE_SUPABASE_ANON_KEY || "").trim(),
     VITE_ROUTER_MODE: String(env.VITE_ROUTER_MODE || "hash").trim() || "hash",
-    SUSHIAMO_DESKTOP_ENABLE_AUTO_UPDATE:
-      String(env.SUSHIAMO_DESKTOP_ENABLE_AUTO_UPDATE || "1").trim() || "1",
-    SUSHIAMO_DESKTOP_UPDATE_URL:
-      String(env.SUSHIAMO_DESKTOP_UPDATE_URL || "https://www.mangiamo.app/downloads").trim(),
+    MANGIAMO_DESKTOP_ENABLE_AUTO_UPDATE:
+      String(env.MANGIAMO_DESKTOP_ENABLE_AUTO_UPDATE || env.SUSHIAMO_DESKTOP_ENABLE_AUTO_UPDATE || "1").trim() || "1",
+    MANGIAMO_DESKTOP_UPDATE_URL:
+      String(env.MANGIAMO_DESKTOP_UPDATE_URL || env.SUSHIAMO_DESKTOP_UPDATE_URL || "https://github.com/Buccoo/mangiamo-desktop/releases/latest/download").trim(),
     PUBLIC_APP_URL: String(env.PUBLIC_APP_URL || env.SUSHIAMO_PUBLIC_APP_URL || "").trim(),
   };
 
