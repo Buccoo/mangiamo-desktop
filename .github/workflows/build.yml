@@ -37,7 +37,7 @@ jobs:
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           SUSHIAMO_DESKTOP_UPDATE_URL: ${{ vars.DESKTOP_UPDATE_URL }}
           SUSHIAMO_DESKTOP_ENABLE_AUTO_UPDATE: "1"
-          PUBLIC_APP_URL: https://dashboard.mangiamo.app
+          PUBLIC_APP_URL: https://manager.mangiamo.app
 
       - name: Package Windows
         run: npx electron-builder --win nsis --publish never
@@ -76,7 +76,7 @@ jobs:
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           SUSHIAMO_DESKTOP_UPDATE_URL: ${{ vars.DESKTOP_UPDATE_URL }}
           SUSHIAMO_DESKTOP_ENABLE_AUTO_UPDATE: "1"
-          PUBLIC_APP_URL: https://dashboard.mangiamo.app
+          PUBLIC_APP_URL: https://manager.mangiamo.app
 
       - name: Validate Apple notarization credentials
         run: |
