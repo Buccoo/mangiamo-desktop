@@ -48,7 +48,7 @@
       "target": [
         "nsis"
       ],
-      "icon": "assets/icon.png",
+      "icon": "assets/icon.ico",
       "artifactName": "Mangiamo-Desktop-Setup.${ext}"
     },
     "mac": {
