@@ -468,11 +468,17 @@ async function installFallbackInstallerAsset() {
     });
 
     if (process.platform === "win32") {
-      const child = spawn(installerPath, [], {
-        detached: true,
-        stdio: "ignore",
-      });
-      child.unref();
+      const opened = await shell.openPath(installerPath);
+      if (opened) {
+        const command = process.env.ComSpec || "cmd.exe";
+        const escapedPath = installerPath.replace(/"/g, '""');
+        const child = spawn(command, ["/d", "/s", "/c", `start "" "${escapedPath}"`], {
+          detached: true,
+          stdio: "ignore",
+          windowsHide: true,
+        });
+        child.unref();
+      }
     } else {
       const opened = await shell.openPath(installerPath);
       if (opened) {
