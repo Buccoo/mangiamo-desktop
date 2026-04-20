@@ -13,6 +13,7 @@ const { DesktopPrintWorker, scanWifiNetworks } = require("./printWorker.cjs") as
 type DesktopRuntimeConfig = {
   VITE_SUPABASE_URL: string;
   VITE_SUPABASE_ANON_KEY: string;
+  VITE_SUPABASE_PUBLISHABLE_KEY?: string;
   VITE_ROUTER_MODE: "browser" | "hash" | string;
   MANGIAMO_DESKTOP_ENABLE_AUTO_UPDATE: "0" | "1" | string;
   MANGIAMO_DESKTOP_UPDATE_URL?: string;
@@ -583,10 +584,15 @@ function writeWindowState(win: BrowserWindow) {
   }
 }
 
+function resolveSupabaseClientKey(source: Record<string, unknown>) {
+  return String(source.VITE_SUPABASE_PUBLISHABLE_KEY || source.VITE_SUPABASE_ANON_KEY || "").trim();
+}
+
 function loadDesktopRuntimeConfig(): DesktopRuntimeConfig {
   const fallback: DesktopRuntimeConfig = {
     VITE_SUPABASE_URL: String(process.env.VITE_SUPABASE_URL || "").trim(),
-    VITE_SUPABASE_ANON_KEY: String(process.env.VITE_SUPABASE_ANON_KEY || "").trim(),
+    VITE_SUPABASE_ANON_KEY: resolveSupabaseClientKey(process.env as Record<string, unknown>),
+    VITE_SUPABASE_PUBLISHABLE_KEY: String(process.env.VITE_SUPABASE_PUBLISHABLE_KEY || "").trim(),
     VITE_ROUTER_MODE: String(process.env.VITE_ROUTER_MODE || "hash").trim() || "hash",
     MANGIAMO_DESKTOP_ENABLE_AUTO_UPDATE:
       String(process.env.MANGIAMO_DESKTOP_ENABLE_AUTO_UPDATE || "0").trim() || "0",
@@ -606,9 +612,13 @@ function loadDesktopRuntimeConfig(): DesktopRuntimeConfig {
       if (!fs.existsSync(candidate)) continue;
       const raw = fs.readFileSync(candidate, "utf8");
       const parsed = JSON.parse(raw) as Partial<DesktopRuntimeConfig>;
-      return {
+      const merged = {
         ...fallback,
         ...parsed,
+      };
+      return {
+        ...merged,
+        VITE_SUPABASE_ANON_KEY: resolveSupabaseClientKey(merged as Record<string, unknown>),
       };
     } catch {
       // keep fallback
@@ -622,6 +632,7 @@ function getInjectedRendererConfig() {
   return {
     VITE_SUPABASE_URL: runtimeConfig.VITE_SUPABASE_URL,
     VITE_SUPABASE_ANON_KEY: runtimeConfig.VITE_SUPABASE_ANON_KEY,
+    VITE_SUPABASE_PUBLISHABLE_KEY: runtimeConfig.VITE_SUPABASE_ANON_KEY,
     VITE_ROUTER_MODE: runtimeConfig.VITE_ROUTER_MODE || "hash",
     PUBLIC_APP_URL: runtimeConfig.PUBLIC_APP_URL || "",
   };

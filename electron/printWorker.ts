@@ -59,6 +59,12 @@ type NonFiscalReceiptJobRow = {
   created_at: string;
 };
 
+type FiscalReceiptPrintJobRow = {
+  id: string;
+  payload: Record<string, unknown> | null;
+  created_at: string;
+};
+
 type LivePrinter = {
   id: string;
   name: string;
@@ -528,6 +534,80 @@ function renderNonFiscalReceiptTicket(job: NonFiscalReceiptJobRow) {
   return lines.join("\n");
 }
 
+function renderFiscalReceiptTicket(job: FiscalReceiptPrintJobRow) {
+  const width = 42;
+  const payload = (job.payload || {}) as Record<string, unknown>;
+  const schemaRoot = (payload.schema && typeof payload.schema === "object" ? payload.schema : {}) as Record<string, unknown>;
+  const ekabs = (schemaRoot.ekabs_v0 && typeof schemaRoot.ekabs_v0 === "object" ? schemaRoot.ekabs_v0 : {}) as Record<string, unknown>;
+  const head = (ekabs.head && typeof ekabs.head === "object" ? ekabs.head : {}) as Record<string, unknown>;
+  const seller = (head.seller && typeof head.seller === "object" ? head.seller : {}) as Record<string, unknown>;
+  const data = (ekabs.data && typeof ekabs.data === "object" ? ekabs.data : {}) as Record<string, unknown>;
+  const linesData = Array.isArray(data.lines) ? data.lines : [];
+  const vatAmounts = Array.isArray(data.vat_amounts) ? data.vat_amounts : [];
+  const payments = Array.isArray(data.payment_types) ? data.payment_types : [];
+  const restaurantName = String(seller.name || payload.restaurant_name || "").trim() || "Ristorante";
+  const receiptNumber = String(head.number || payload.receipt_id || "").trim() || "-";
+  const paidAt = typeof head.date === "number"
+    ? formatTimestamp(new Date(head.date * 1000).toISOString())
+    : formatTimestamp(payload.paid_at || job.created_at);
+  const paymentMethod = normalizePaymentMethod((payments[0] as Record<string, unknown> | undefined)?.name || payload.payment_method);
+  const paymentLabel = paymentMethod === "card" ? "Carta" : paymentMethod === "cash" ? "Contanti" : "Altro";
+  const totalAmount = String(data.full_amount_incl_vat || payload.total_amount || "").trim();
+
+  const center = (text: string) => {
+    if (text.length >= width) return text;
+    const pad = Math.floor((width - text.length) / 2);
+    return " ".repeat(pad) + text;
+  };
+
+  const lines: string[] = [];
+  lines.push("=".repeat(width));
+  lines.push(center(restaurantName));
+  lines.push("=".repeat(width));
+  lines.push(center("SCONTRINO FISCALE"));
+  lines.push("-".repeat(width));
+  lines.push(`DOC: ${receiptNumber}`);
+  if (paidAt) lines.push(`DATA: ${paidAt}`);
+  lines.push("-".repeat(width));
+
+  for (const rawLine of linesData) {
+    const line = (rawLine && typeof rawLine === "object" ? rawLine : {}) as Record<string, unknown>;
+    const label = String(line.text || "").trim() || "Voce";
+    const item = (line.item && typeof line.item === "object" ? line.item : {}) as Record<string, unknown>;
+    const qty = Number(item.quantity || 1);
+    const unitPrice = Number(item.price_per_unit || 0);
+    const lineTotal = Number((((line.vat_amounts as Array<Record<string, unknown>> | undefined)?.[0] || {}) as Record<string, unknown>).incl_vat || qty * unitPrice || 0);
+    const printedLabel = qty > 1 && !/x\d+$/i.test(label) ? `${label} x${qty}` : label;
+    const wrapped = wrapText(printedLabel, width - 12);
+    wrapped.forEach((chunk, chunkIndex) => {
+      if (chunkIndex === 0) {
+        lines.push(padRow(chunk, formatCurrency(lineTotal), width));
+      } else {
+        lines.push(chunk);
+      }
+    });
+  }
+
+  if (vatAmounts.length > 0) {
+    lines.push("-".repeat(width));
+    for (const rawVat of vatAmounts) {
+      const vat = (rawVat && typeof rawVat === "object" ? rawVat : {}) as Record<string, unknown>;
+      const percentage = String(vat.percentage || "0").trim() || "0";
+      const amount = formatCurrency(vat.vat || 0);
+      lines.push(padRow(`IVA ${percentage}%`, amount, width));
+    }
+  }
+
+  lines.push("-".repeat(width));
+  lines.push(padRow("TOTALE", formatCurrency(totalAmount || 0), width));
+  lines.push(padRow("Pagamento", paymentLabel, width));
+  lines.push("=".repeat(width));
+  lines.push(center("Documento fiscale emesso"));
+  lines.push(center("via Fiskaly eReceipt"));
+  lines.push("=".repeat(width));
+  return lines.join("\n");
+}
+
 function isBoldLine(line: string) {
   const trimmed = line.trim();
   if (!trimmed) return false;
@@ -763,6 +843,7 @@ export class DesktopPrintWorker {
   private supabase: SupabaseClient | null = null;
   private physicalReceiptRpcAvailable = true;
   private nonFiscalReceiptRpcAvailable = true;
+  private fiscalReceiptRpcAvailable = true;
   private boundWindow: BrowserWindow | null = null;
   private service = {
     running: false,
@@ -883,6 +964,7 @@ export class DesktopPrintWorker {
     };
     this.physicalReceiptRpcAvailable = true;
     this.nonFiscalReceiptRpcAvailable = true;
+    this.fiscalReceiptRpcAvailable = true;
     this.pushLog("INFO", `Servizio stampa avviato (${this.config.consumerId})`);
     this.broadcastState();
     void this.runTick();
@@ -1379,6 +1461,39 @@ export class DesktopPrintWorker {
     if (error) throw error;
   }
 
+  private async sendToFiscalReceiptPrinter(job: FiscalReceiptPrintJobRow) {
+    const payload = (job.payload && typeof job.payload === "object" ? job.payload : {}) as Record<string, unknown>;
+    const route = (payload.route && typeof payload.route === "object" ? payload.route : {}) as Record<string, unknown>;
+    const host = String(route.host ?? "").trim();
+    const port = sanitizePrinterPort(route.port ?? 9100);
+    if (!host) throw new Error("NO_PRINTER_HOST");
+    const ticketText = renderFiscalReceiptTicket(job);
+    const escPosPayload = buildEscPosPayload(ticketText);
+    let lastError: unknown = null;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        await openRawSocket(host, port, escPosPayload);
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt >= 2 || !shouldRetryPrintLocally(error)) break;
+        await sleep(500);
+      }
+    }
+    throw new Error(`${normalizeError(lastError)} (target ${host}:${port})`);
+  }
+
+  private async completeFiscalReceiptJob(job: FiscalReceiptPrintJobRow, success: boolean, errorMessage: string | null) {
+    const client = this.ensureSupabaseClient();
+    const { error } = await client.rpc("fiscal_receipt_print_complete_job", {
+      p_job_id: job.id,
+      p_consumer_id: this.config.consumerId,
+      p_success: success,
+      p_error: success ? null : String(errorMessage || "PRINT_FAILED").slice(0, 500),
+    });
+    if (error) throw error;
+  }
+
   private async runTick() {
     if (!this.service.running || this.service.processing) return;
     this.service.processing = true;
@@ -1520,6 +1635,55 @@ export class DesktopPrintWorker {
           }
         } catch (nfrTickError) {
           this.pushLog("ERROR", `Tick scontrino non fiscale: ${normalizeError(nfrTickError)}`);
+        }
+      }
+
+      if (this.fiscalReceiptRpcAvailable) {
+        try {
+          const { data: fiscalData, error: fiscalError } = await client.rpc("fiscal_receipt_print_claim_jobs", {
+            p_restaurant_id: this.authState.restaurant.id,
+            p_consumer_id: this.config.consumerId,
+            p_limit: this.config.claimLimit,
+          });
+
+          if (fiscalError) {
+            if (isMissingRpcError(fiscalError, "fiscal_receipt_print_claim_jobs")) {
+              this.fiscalReceiptRpcAvailable = false;
+              this.pushLog("WARN", "RPC fiscal_receipt_print_claim_jobs non trovata: applica la migrazione stampa fiscale.");
+            } else {
+              throw fiscalError;
+            }
+          } else {
+            const fiscalJobs = (Array.isArray(fiscalData) ? fiscalData : []) as FiscalReceiptPrintJobRow[];
+            this.service.stats.claimed += fiscalJobs.length;
+            if (fiscalJobs.length > 0) {
+              this.pushLog("INFO", `Claimati ${fiscalJobs.length} job scontrino fiscale`);
+            }
+
+            for (const job of fiscalJobs) {
+              try {
+                await this.sendToFiscalReceiptPrinter(job);
+                await this.completeFiscalReceiptJob(job, true, null);
+                this.service.stats.printed += 1;
+                this.pushLog("INFO", `Stampato scontrino fiscale ${String(job.id).slice(0, 8)}`);
+              } catch (jobError) {
+                const message = normalizeError(jobError);
+                try {
+                  await this.completeFiscalReceiptJob(job, false, message);
+                } catch (ackError) {
+                  if (isMissingRpcError(ackError, "fiscal_receipt_print_complete_job")) {
+                    this.fiscalReceiptRpcAvailable = false;
+                  } else {
+                    this.pushLog("ERROR", `Ack failed fiscal job ${String(job.id).slice(0, 8)}: ${normalizeError(ackError)}`);
+                  }
+                }
+                this.service.stats.failed += 1;
+                this.pushLog("ERROR", `Errore fiscal job ${String(job.id).slice(0, 8)}: ${message}`);
+              }
+            }
+          }
+        } catch (fiscalTickError) {
+          this.pushLog("ERROR", `Tick scontrino fiscale: ${normalizeError(fiscalTickError)}`);
         }
       }
 

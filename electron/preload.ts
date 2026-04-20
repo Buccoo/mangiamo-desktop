@@ -3,6 +3,7 @@
 type RuntimeConfig = {
   VITE_SUPABASE_URL?: string;
   VITE_SUPABASE_ANON_KEY?: string;
+  VITE_SUPABASE_PUBLISHABLE_KEY?: string;
   VITE_ROUTER_MODE?: string;
   PUBLIC_APP_URL?: string;
 };

@@ -43,10 +43,12 @@ async function readEnvFiles() {
 async function main() {
   const fromFiles = await readEnvFiles();
   const env = { ...fromFiles, ...process.env };
+  const supabaseClientKey = String(env.VITE_SUPABASE_PUBLISHABLE_KEY || env.VITE_SUPABASE_ANON_KEY || "").trim();
 
   const config = {
     VITE_SUPABASE_URL: String(env.VITE_SUPABASE_URL || "").trim(),
-    VITE_SUPABASE_ANON_KEY: String(env.VITE_SUPABASE_ANON_KEY || "").trim(),
+    VITE_SUPABASE_ANON_KEY: supabaseClientKey,
+    VITE_SUPABASE_PUBLISHABLE_KEY: supabaseClientKey,
     VITE_ROUTER_MODE: String(env.VITE_ROUTER_MODE || "hash").trim() || "hash",
     MANGIAMO_DESKTOP_ENABLE_AUTO_UPDATE:
       String(env.MANGIAMO_DESKTOP_ENABLE_AUTO_UPDATE || env.SUSHIAMO_DESKTOP_ENABLE_AUTO_UPDATE || "1").trim() || "1",
@@ -57,7 +59,7 @@ async function main() {
 
   if (!config.VITE_SUPABASE_URL || !config.VITE_SUPABASE_ANON_KEY) {
     throw new Error(
-      "Missing VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY. Set them in .env.desktop (or .env).",
+      "Missing VITE_SUPABASE_URL and a Supabase client key. Set VITE_SUPABASE_PUBLISHABLE_KEY or VITE_SUPABASE_ANON_KEY in .env.desktop (or .env).",
     );
   }
 
