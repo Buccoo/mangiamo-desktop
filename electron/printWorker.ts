@@ -197,8 +197,8 @@ function sanitizeDeviceName(value: unknown) {
 
 function sanitizePollMs(value: unknown) {
   const n = Number(value);
-  if (!Number.isFinite(n)) return 2500;
-  return Math.max(1000, Math.min(10000, Math.trunc(n)));
+  if (!Number.isFinite(n)) return 1000;
+  return Math.max(500, Math.min(10000, Math.trunc(n)));
 }
 
 function sanitizeClaimLimit(value: unknown) {
@@ -835,7 +835,7 @@ export class DesktopPrintWorker {
   private config: WorkerConfig = {
     consumerId: sanitizeConsumerId(""),
     deviceName: sanitizeDeviceName(`Bridge ${os.hostname()}`),
-    pollMs: 2500,
+    pollMs: 1000,
     claimLimit: 5,
     autoStart: true,
   };
