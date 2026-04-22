@@ -279,10 +279,10 @@ function resolveFallbackInstallerAsset() {
     const isArm = process.arch === "arm64";
     const fileName = isArm ? "Mangiamo-Desktop-macOS-arm64.dmg" : "Mangiamo-Desktop-macOS-x64.dmg";
     const candidates = [
-      ...desktopUpdateFeedCandidates,
+      GITHUB_RELEASES_BASE,
       explicitUpdateUrl,
       publicDownloadsBase,
-      GITHUB_RELEASES_BASE,
+      ...desktopUpdateFeedCandidates,
     ]
       .map((value) => String(value || "").trim().replace(/\/+$/, ""))
       .filter(Boolean)
@@ -298,10 +298,10 @@ function resolveFallbackInstallerAsset() {
 
   const fileName = "Mangiamo-Desktop-Setup.exe";
   const candidates = [
-    ...desktopUpdateFeedCandidates,
+    GITHUB_RELEASES_BASE,
     explicitUpdateUrl,
     publicDownloadsBase,
-    GITHUB_RELEASES_BASE,
+    ...desktopUpdateFeedCandidates,
   ]
     .map((value) => String(value || "").trim().replace(/\/+$/, ""))
     .filter(Boolean)
@@ -311,6 +311,77 @@ function resolveFallbackInstallerAsset() {
     fileName,
     urls: [...new Set(candidates)],
   };
+}
+
+function looksLikeHtmlOrTextFile(buffer: Buffer) {
+  const prefix = buffer.subarray(0, Math.min(buffer.length, 1024)).toString("utf8").trimStart().toLowerCase();
+  return (
+    prefix.startsWith("<!doctype") ||
+    prefix.startsWith("<html") ||
+    prefix.startsWith("<?xml") ||
+    prefix.startsWith("{") ||
+    prefix.startsWith("[")
+  );
+}
+
+function isCompatibleWindowsBinary(machine: number) {
+  // 0x14c = x86, 0x8664 = x64, 0xaa64 = arm64
+  if (process.arch === "x64") {
+    return machine === 0x8664 || machine === 0x14c;
+  }
+  if (process.arch === "ia32") {
+    return machine === 0x14c;
+  }
+  if (process.arch === "arm64") {
+    // Windows arm64 can run arm64 binaries natively and x64/x86 through emulation.
+    return machine === 0xaa64 || machine === 0x8664 || machine === 0x14c;
+  }
+  return true;
+}
+
+async function validateFallbackInstallerFile(filePath: string) {
+  const stat = await fs.promises.stat(filePath);
+  if (!stat.isFile()) {
+    throw new Error("FALLBACK_INSTALLER_NOT_A_FILE");
+  }
+
+  if (stat.size < 256 * 1024) {
+    throw new Error(`FALLBACK_INSTALLER_TOO_SMALL_${stat.size}`);
+  }
+
+  const handle = await fs.promises.open(filePath, "r");
+  try {
+    const headerSize = Math.min(Math.max(stat.size, 4096), 1024 * 1024);
+    const header = Buffer.alloc(Number(headerSize));
+    await handle.read(header, 0, header.length, 0);
+
+    if (looksLikeHtmlOrTextFile(header)) {
+      throw new Error("FALLBACK_INSTALLER_HTML_OR_TEXT_CONTENT");
+    }
+
+    if (process.platform === "win32") {
+      if (header.length < 0x40 || header[0] !== 0x4d || header[1] !== 0x5a) {
+        throw new Error("FALLBACK_INSTALLER_INVALID_MZ_HEADER");
+      }
+
+      const peOffset = header.readUInt32LE(0x3c);
+      if (peOffset + 6 >= header.length) {
+        throw new Error("FALLBACK_INSTALLER_INVALID_PE_OFFSET");
+      }
+
+      const peSignature = header.toString("ascii", peOffset, peOffset + 4);
+      if (peSignature !== "PE\u0000\u0000") {
+        throw new Error("FALLBACK_INSTALLER_INVALID_PE_SIGNATURE");
+      }
+
+      const machine = header.readUInt16LE(peOffset + 4);
+      if (!isCompatibleWindowsBinary(machine)) {
+        throw new Error(`FALLBACK_INSTALLER_INCOMPATIBLE_ARCH_${machine.toString(16)}`);
+      }
+    }
+  } finally {
+    await handle.close();
+  }
 }
 
 async function downloadWithRedirects(url: string, destinationPath: string, redirectLimit = 5): Promise<void> {
@@ -403,6 +474,7 @@ async function downloadFallbackInstallerAsset() {
     for (const url of urls) {
       try {
         await downloadWithRedirects(url, targetPath);
+        await validateFallbackInstallerFile(targetPath);
         downloadedFrom = url;
         break;
       } catch (error) {

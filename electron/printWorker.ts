@@ -636,17 +636,20 @@ function getLinePrintSize(line: string) {
   return 0x00;
 }
 
-function buildEscPosPayload(ticketText: string) {
+function buildEscPosPayload(ticketText: string, options?: { align?: "left" | "center" }) {
   const ESC = 0x1b;
   const GS = 0x1d;
   const EXTRA_FEED_LINES = 5;
   const lines = ticketText.split(/\r?\n/);
+  const alignCenter = options?.align === "center";
   const chunks = [
     Buffer.from([ESC, 0x40]),
     // Alternate ESC/POS font (Font B) for a less rigid look.
     Buffer.from([ESC, 0x4d, 0x01]),
     // Slight character spacing improves readability on thermal heads.
     Buffer.from([ESC, 0x20, 0x02]),
+    // Align whole ticket block according to printer paper width.
+    Buffer.from([ESC, 0x61, alignCenter ? 0x01 : 0x00]),
   ];
   let bold = false;
   let size = 0x00;
@@ -665,6 +668,7 @@ function buildEscPosPayload(ticketText: string) {
   }
   if (bold) chunks.push(Buffer.from([ESC, 0x45, 0x00]));
   if (size !== 0x00) chunks.push(Buffer.from([GS, 0x21, 0x00]));
+  if (alignCenter) chunks.push(Buffer.from([ESC, 0x61, 0x00]));
   chunks.push(Buffer.from([ESC, 0x64, EXTRA_FEED_LINES]));
   chunks.push(Buffer.from([GS, 0x56, 0x00]));
   return Buffer.concat(chunks);
@@ -1435,7 +1439,7 @@ export class DesktopPrintWorker {
     const port = sanitizePrinterPort(route.port ?? 9100);
     if (!host) throw new Error("NO_PRINTER_HOST");
     const ticketText = renderNonFiscalReceiptTicket(job);
-    const escPosPayload = buildEscPosPayload(ticketText);
+    const escPosPayload = buildEscPosPayload(ticketText, { align: "center" });
     let lastError: unknown = null;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
@@ -1468,7 +1472,7 @@ export class DesktopPrintWorker {
     const port = sanitizePrinterPort(route.port ?? 9100);
     if (!host) throw new Error("NO_PRINTER_HOST");
     const ticketText = renderFiscalReceiptTicket(job);
-    const escPosPayload = buildEscPosPayload(ticketText);
+    const escPosPayload = buildEscPosPayload(ticketText, { align: "center" });
     let lastError: unknown = null;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
