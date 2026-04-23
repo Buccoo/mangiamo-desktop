@@ -526,8 +526,8 @@ function renderNonFiscalReceiptTicket(job: NonFiscalReceiptJobRow) {
   lines.push("-".repeat(width));
 
   if (ayceTotal > 0) lines.push(padRow("AYCE", formatCurrency(ayceTotal), width));
-  if (coverTotal > 0) lines.push(padRow("Coperto", formatCurrency(coverTotal), width));
   if (extrasTotal > 0) lines.push(padRow(extrasLabel, formatCurrency(extrasTotal), width));
+  if (coverTotal > 0) lines.push(padRow("Coperto", formatCurrency(coverTotal), width));
 
   lines.push("-".repeat(width));
   lines.push(padRow("TOTALE", formatCurrency(totalAmount), width));
