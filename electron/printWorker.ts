@@ -499,10 +499,15 @@ function renderNonFiscalReceiptTicket(job: NonFiscalReceiptJobRow) {
   const paidAt = formatTimestamp(payload.paid_at || job.created_at);
   const paymentMethod = normalizePaymentMethod(payload.payment_method);
   const paymentLabel = paymentMethod === "card" ? "Carta" : "Contanti";
+  const paymentScope = String(payload.payment_scope || "").toLowerCase().trim();
+  const personsAtPayment = Math.max(1, Math.trunc(Number(payload.persons_at_payment ?? 1) || 1));
   const ayceTotal = Number(payload.ayce_total) || 0;
   const coverTotal = Number(payload.cover_total) || 0;
   const extrasTotal = Number(payload.extras_total) || 0;
   const totalAmount = Number(payload.total_amount) || 0;
+  const extrasLabel = paymentScope === "roman_split"
+    ? (personsAtPayment === 1 ? "1 Quota" : `${personsAtPayment} Quote`)
+    : "Extra";
 
   const center = (text: string) => {
     if (text.length >= width) return text;
@@ -522,7 +527,7 @@ function renderNonFiscalReceiptTicket(job: NonFiscalReceiptJobRow) {
 
   if (ayceTotal > 0) lines.push(padRow("AYCE", formatCurrency(ayceTotal), width));
   if (coverTotal > 0) lines.push(padRow("Coperto", formatCurrency(coverTotal), width));
-  if (extrasTotal > 0) lines.push(padRow("Extra", formatCurrency(extrasTotal), width));
+  if (extrasTotal > 0) lines.push(padRow(extrasLabel, formatCurrency(extrasTotal), width));
 
   lines.push("-".repeat(width));
   lines.push(padRow("TOTALE", formatCurrency(totalAmount), width));
