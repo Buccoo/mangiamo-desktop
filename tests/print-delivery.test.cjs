@@ -22,11 +22,17 @@ test("real desktop ticket contains variant quantities and additions", () => {
   const text = render({ department: "sushi", payload: { restaurant_name: "Fixture", table_number: "1", items: [{
     name: "Nigiri", quantity: 2, notes: "senza wasabi", modifiers: [
       { name: "Salmone", qty: 2, modifier_type: "variant" },
-      { name: "Avocado", qty: 1, modifier_type: "addon" },
+      { name: "Avocado", qty: 1, modifier_type: "extra" },
+      { name: "Wasabi", qty: 1, modifier_type: "remove" },
+      { name: "Cipolla", qty: 2, modifier_type: "removal" },
+      { name: "Maionese", qty: 1, modifier_type: "addon" },
     ],
   }] } });
   assert.match(text, /Salmone x2/);
-  assert.match(text, /Avocado/);
+  assert.match(text, /\+ Avocado/);
+  assert.match(text, /SENZA Wasabi/);
+  assert.match(text, /SENZA Cipolla x2/);
+  assert.match(text, /\+ Maionese/);
   assert.match(text, /senza wasabi/);
 });
 

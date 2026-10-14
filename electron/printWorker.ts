@@ -470,7 +470,8 @@ function renderTicket(job: JobRow) {
       const name = String(modifier.name || "").trim();
       if (!name) continue;
       const modifierQty = Math.max(1, Math.trunc(Number(modifier.qty) || 1));
-      const prefix = modifier.modifier_type === "addon" ? "+ " : "Variante: ";
+      const modifierType = String(modifier.modifier_type || "variant").trim().toLowerCase();
+      const prefix = ["remove", "removal"].includes(modifierType) ? "SENZA " : ["extra", "addon"].includes(modifierType) ? "+ " : "Variante: ";
       for (const chunk of wrapText(`${prefix}${name}${modifierQty > 1 ? ` x${modifierQty}` : ""}`, width - 2)) lines.push(` ${chunk}`);
     }
     const notes = String(item.notes || "").trim();
