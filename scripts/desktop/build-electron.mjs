@@ -5,6 +5,10 @@ const watchMode = process.argv.includes("--watch");
 
 const targets = [
   {
+    entryPoints: ["electron/printDelivery.ts"],
+    outfile: "electron-dist/printDelivery.cjs",
+  },
+  {
     entryPoints: ["electron/main.ts"],
     outfile: "electron-dist/main.cjs",
   },

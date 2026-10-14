@@ -6,6 +6,8 @@ import path from "node:path";
 import { promisify } from "node:util";
 import type { BrowserWindow } from "electron";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import type * as PrintDelivery from "./printDelivery";
+const { LocalPrintJournal, PrintNotSentError, deliverPrintJob } = require("./printDelivery.cjs") as typeof PrintDelivery;
 
 type RuntimeConfig = {
   VITE_SUPABASE_URL: string;
@@ -202,9 +204,9 @@ function sanitizePollMs(value: unknown) {
 }
 
 function sanitizeClaimLimit(value: unknown) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return 5;
-  return Math.max(1, Math.min(20, Math.trunc(n)));
+  // One lease covers one physical operation; waiting batches can outlive a lease.
+  void value;
+  return 1;
 }
 
 function sanitizePrinterPort(value: unknown) {
@@ -338,26 +340,16 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function shouldRetryPrintLocally(error: unknown) {
-  const message = normalizeError(error).toLowerCase();
-  return (
-    message.includes("timeout") ||
-    message.includes("econnreset") ||
-    message.includes("ehostunreach") ||
-    message.includes("econnrefused") ||
-    message.includes("epipe")
-  );
-}
-
 function openRawSocket(host: string, port: number, payload: Buffer, timeoutMs = 25000) {
   return new Promise<void>((resolve, reject) => {
     const socket = new net.Socket();
     let done = false;
+    let writeStarted = false;
     const complete = (error?: Error | null) => {
       if (done) return;
       done = true;
       socket.destroy();
-      if (error) reject(error);
+      if (error) reject(writeStarted ? error : new PrintNotSentError(error.message));
       else resolve();
     };
     socket.setNoDelay(true);
@@ -365,6 +357,7 @@ function openRawSocket(host: string, port: number, payload: Buffer, timeoutMs = 
     socket.once("error", (error) => complete(error));
     socket.once("timeout", () => complete(new Error("Timeout stampante")));
     socket.connect(port, host, () => {
+      writeStarted = true;
       socket.write(payload, (error) => {
         if (error) {
           complete(error);
@@ -375,7 +368,7 @@ function openRawSocket(host: string, port: number, payload: Buffer, timeoutMs = 
     });
     socket.once("close", (hadError) => {
       if (hadError) return;
-      if (!done) complete(null);
+      if (!done) complete(new Error("Connessione stampante chiusa prima della conferma di invio"));
     });
   });
 }
@@ -472,6 +465,14 @@ function renderTicket(job: JobRow) {
     const qty = Math.max(1, Number(item.quantity) || 1);
     const label = `${qty}x ${prettifyDishName(item.name)}`;
     for (const chunk of wrapText(label, width)) lines.push(chunk);
+    for (const rawModifier of Array.isArray(item.modifiers) ? item.modifiers : []) {
+      const modifier = (rawModifier || {}) as Record<string, unknown>;
+      const name = String(modifier.name || "").trim();
+      if (!name) continue;
+      const modifierQty = Math.max(1, Math.trunc(Number(modifier.qty) || 1));
+      const prefix = modifier.modifier_type === "addon" ? "+ " : "Variante: ";
+      for (const chunk of wrapText(`${prefix}${name}${modifierQty > 1 ? ` x${modifierQty}` : ""}`, width - 2)) lines.push(` ${chunk}`);
+    }
     const notes = String(item.notes || "").trim();
     if (notes) for (const chunk of wrapText(`Nota: ${notes}`, width - 2)) lines.push(` ${chunk}`);
   }
@@ -771,7 +772,8 @@ function collectLanTargets() {
 
   for (const [interfaceName, rows] of Object.entries(interfaces)) {
     for (const row of rows || []) {
-      const family = typeof row.family === "string" ? row.family : row.family === 4 ? "IPv4" : "IPv6";
+      const rawFamily = (row as { family: string | number }).family;
+      const family = typeof rawFamily === "string" ? rawFamily : rawFamily === 4 ? "IPv4" : "IPv6";
       if (family !== "IPv4") continue;
       if (row.internal) continue;
       const ipv4 = normalizeIpv4(row.address || "");
@@ -836,6 +838,7 @@ export class DesktopPrintWorker {
   private readonly appVersion: string;
   private readonly onMainLog?: (level: "INFO" | "WARN" | "ERROR", message: string) => void;
   private readonly configPath: string;
+  private readonly deliveryJournal: InstanceType<typeof LocalPrintJournal>;
   private readonly logs: WorkerLogRow[] = [];
   private readonly authState: { user: { id: string; email: string | null } | null; restaurant: RestaurantScope | null } = {
     user: null,
@@ -845,7 +848,7 @@ export class DesktopPrintWorker {
     consumerId: sanitizeConsumerId(""),
     deviceName: sanitizeDeviceName(`Bridge ${os.hostname()}`),
     pollMs: 1000,
-    claimLimit: 5,
+    claimLimit: 1,
     autoStart: true,
   };
   private savedSession: SessionSnapshot | null = null;
@@ -873,6 +876,7 @@ export class DesktopPrintWorker {
     this.appVersion = deps.appVersion;
     this.onMainLog = deps.onMainLog;
     this.configPath = path.join(deps.userDataPath, CONFIG_FILENAME);
+    this.deliveryJournal = new LocalPrintJournal(path.join(deps.userDataPath, "desktop-print-delivery-journal.json"));
   }
 
   attachWindow(win: BrowserWindow | null) {
@@ -962,7 +966,6 @@ export class DesktopPrintWorker {
       throw new Error("Nessun ristorante associato all'account.");
     }
     this.service.running = true;
-    this.service.processing = false;
     this.service.assignedPrinterId = null;
     this.service.stats = {
       claimed: 0,
@@ -982,7 +985,6 @@ export class DesktopPrintWorker {
 
   async stopService() {
     this.service.running = false;
-    this.service.processing = false;
     if (this.service.timer) {
       clearTimeout(this.service.timer);
       this.service.timer = null;
@@ -1296,11 +1298,8 @@ export class DesktopPrintWorker {
     const snapshotPort = sanitizePrinterPort(snapshotRoute.port);
     const dep = normalizeDepartment(job.department);
 
-    if (liveRoutes?.byId && snapshotId) {
-      const live = liveRoutes.byId.get(snapshotId);
-      if (live && live.enabled && live.host) {
-        return { id: live.id, name: live.name, host: live.host, port: live.port };
-      }
+    if (dep === "test" && snapshotHost) {
+      return { id: snapshotId, name: String(snapshotRoute.name || snapshotHost), host: snapshotHost, port: snapshotPort };
     }
     if (liveRoutes?.byDepartment) {
       const byDep = liveRoutes.byDepartment.get(dep);
@@ -1308,12 +1307,8 @@ export class DesktopPrintWorker {
         return { id: byDep.id, name: byDep.name, host: byDep.host, port: byDep.port };
       }
     }
-    if (liveRoutes?.byId && liveRoutes.defaultPrinterId) {
-      const fallback = liveRoutes.byId.get(liveRoutes.defaultPrinterId);
-      if (fallback && fallback.enabled && fallback.host) {
-        return { id: fallback.id, name: fallback.name, host: fallback.host, port: fallback.port };
-      }
-    }
+    // A removed/reassigned department must not spill into the default printer.
+    if (liveRoutes) return null;
     if (snapshotHost) {
       return {
         id: snapshotId,
@@ -1328,7 +1323,7 @@ export class DesktopPrintWorker {
   private async sendToPrinter(job: JobRow, routeOverride: { host: string; port: number } | null) {
     const host = String(routeOverride?.host || "").trim();
     const port = sanitizePrinterPort(routeOverride?.port);
-    if (!host) throw new Error("NO_PRINTER_HOST");
+    if (!host) throw new PrintNotSentError("NO_PRINTER_HOST");
     const payload = buildEscPosPayload(renderTicket(job));
     let lastError: unknown = null;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
@@ -1337,24 +1332,27 @@ export class DesktopPrintWorker {
         return;
       } catch (error) {
         lastError = error;
-        if (attempt >= 2 || !shouldRetryPrintLocally(error)) break;
+        if (attempt >= 2 || !(error instanceof PrintNotSentError)) break;
         await sleep(500);
       }
     }
-    throw new Error(`${normalizeError(lastError)} (target ${host}:${port})`);
+    const message = `${normalizeError(lastError)} (target ${host}:${port})`;
+    if (lastError instanceof PrintNotSentError) throw new PrintNotSentError(message);
+    throw new Error(message);
   }
 
-  private async completePrintJob(job: JobRow, success: boolean, errorMessage: string | null) {
+  private async completePrintJob(job: Pick<JobRow, "id">, success: boolean, errorMessage: string | null, meta: Record<string, unknown> = {}, consumerId = this.config.consumerId) {
     const client = this.ensureSupabaseClient();
     const { error } = await client.rpc("print_complete_job", {
       p_job_id: job.id,
-      p_consumer_id: this.config.consumerId,
+      p_consumer_id: consumerId,
       p_success: success,
       p_error: success ? null : String(errorMessage || "PRINT_FAILED").slice(0, 500),
       p_meta: {
         source: "desktop_all_in_one",
         device_name: this.config.deviceName,
         app_version: this.appVersion,
+        ...meta,
       },
     });
     if (error) throw error;
@@ -1365,7 +1363,7 @@ export class DesktopPrintWorker {
     const brand = normalizePhysicalBrand(route.brand);
     const port = sanitizePhysicalPort(route.port, brand);
     const apiPath = sanitizePhysicalPath(route.api_path, brand);
-    if (!host) throw new Error("PHYSICAL_RT_HOST_MISSING");
+    if (!host) throw new PrintNotSentError("PHYSICAL_RT_HOST_MISSING");
 
     const endpoint = `http://${host}:${port}${apiPath}`;
     const body = buildEpsonFiscalReceiptXml(payload);
@@ -1398,43 +1396,35 @@ export class DesktopPrintWorker {
     const payload = (job.payload && typeof job.payload === "object" ? job.payload : {}) as Record<string, unknown>;
     const route = (payload.route && typeof payload.route === "object" ? payload.route : {}) as Record<string, unknown>;
 
-    let lastError: unknown = null;
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      try {
-        const receiptId = await this.postPhysicalReceipt(route, payload);
-        return receiptId || `RT-${String(job.id || "").slice(0, 8)}-${Date.now()}`;
-      } catch (error) {
-        lastError = error;
-        if (attempt >= 2 || !shouldRetryPrintLocally(error)) break;
-        await sleep(500);
-      }
-    }
-
-    const host = String(route.host ?? "").trim() || "n/a";
-    const brand = normalizePhysicalBrand(route.brand);
-    const port = sanitizePhysicalPort(route.port, brand);
-    throw new Error(`${normalizeError(lastError)} (target ${host}:${port})`);
+    // A POST may have emitted the document even if its response was lost.
+    const receiptId = await this.postPhysicalReceipt(route, payload);
+    return receiptId || `RT-${String(job.id || "").slice(0, 8)}-${Date.now()}`;
   }
 
-  private async completePhysicalReceiptJob(
-    job: PhysicalReceiptJobRow,
-    success: boolean,
-    options: { receiptId?: string | null; error?: string | null } = {},
-  ) {
+  private async completeReceiptDelivery(queue: Exclude<PrintDelivery.PrintQueue, "kitchen">, jobId: string, success: boolean, errorMessage: string | null, meta: Record<string, unknown>, consumerId = this.config.consumerId) {
     const client = this.ensureSupabaseClient();
-    const { error } = await client.rpc("physical_receipt_complete_job", {
-      p_job_id: job.id,
-      p_consumer_id: this.config.consumerId,
+    const { error } = await client.rpc("print_ack_receipt_delivery", {
+      p_queue: queue,
+      p_job_id: jobId,
+      p_consumer_id: consumerId,
       p_success: success,
-      p_receipt_id: success ? String(options.receiptId || "").trim() || null : null,
-      p_error: success ? null : String(options.error || "PHYSICAL_RECEIPT_FAILED").slice(0, 500),
-      p_meta: {
-        source: "desktop_all_in_one",
-        device_name: this.config.deviceName,
-        app_version: this.appVersion,
-      },
+      p_receipt_id: meta.receipt_id || null,
+      p_error: errorMessage,
+      p_meta: { source: "desktop_all_in_one", device_name: this.config.deviceName, app_version: this.appVersion, ...meta },
     });
     if (error) throw error;
+  }
+
+  private async deliverReceipt(queue: Exclude<PrintDelivery.PrintQueue, "kitchen">, job: { id: string; delivery_generation?: number }, send: () => Promise<void | string>) {
+    if (!this.authState.restaurant?.id) throw new PrintNotSentError("RESTAURANT_NOT_FOUND");
+    const outcome = await deliverPrintJob(this.deliveryJournal, { queue, jobId: job.id, restaurantId: this.authState.restaurant.id, consumerId: this.config.consumerId, generation: Number(job.delivery_generation) || 0 }, async () => {
+      const { error } = await this.ensureSupabaseClient().rpc("print_renew_receipt_claim", { p_queue: queue, p_job_id: job.id, p_consumer_id: this.config.consumerId });
+      if (error) throw new PrintNotSentError(normalizeError(error));
+      return send();
+    }, (success, errorMessage, meta) => this.completeReceiptDelivery(queue, job.id, success, errorMessage, meta));
+    if (outcome === "sent") this.service.stats.printed += 1;
+    else this.service.stats.failed += 1;
+    this.pushLog(outcome === "sent" ? "INFO" : "ERROR", `Ricevuta ${queue} ${String(job.id).slice(0, 8)}: ${outcome}; verificare uscita carta`);
   }
 
   private async sendToNonFiscalReceiptPrinter(job: NonFiscalReceiptJobRow) {
@@ -1442,7 +1432,7 @@ export class DesktopPrintWorker {
     const route = (payload.route && typeof payload.route === "object" ? payload.route : {}) as Record<string, unknown>;
     const host = String(route.host ?? "").trim();
     const port = sanitizePrinterPort(route.port ?? 9100);
-    if (!host) throw new Error("NO_PRINTER_HOST");
+    if (!host) throw new PrintNotSentError("NO_PRINTER_HOST");
     const ticketText = renderNonFiscalReceiptTicket(job);
     const escPosPayload = buildEscPosPayload(ticketText, { align: "center" });
     let lastError: unknown = null;
@@ -1452,22 +1442,13 @@ export class DesktopPrintWorker {
         return;
       } catch (error) {
         lastError = error;
-        if (attempt >= 2 || !shouldRetryPrintLocally(error)) break;
+        if (attempt >= 2 || !(error instanceof PrintNotSentError)) break;
         await sleep(500);
       }
     }
-    throw new Error(`${normalizeError(lastError)} (target ${host}:${port})`);
-  }
-
-  private async completeNonFiscalReceiptJob(job: NonFiscalReceiptJobRow, success: boolean, errorMessage: string | null) {
-    const client = this.ensureSupabaseClient();
-    const { error } = await client.rpc("non_fiscal_receipt_complete_job", {
-      p_job_id: job.id,
-      p_consumer_id: this.config.consumerId,
-      p_success: success,
-      p_error: success ? null : String(errorMessage || "PRINT_FAILED").slice(0, 500),
-    });
-    if (error) throw error;
+    const message = `${normalizeError(lastError)} (target ${host}:${port})`;
+    if (lastError instanceof PrintNotSentError) throw new PrintNotSentError(message);
+    throw new Error(message);
   }
 
   private async sendToFiscalReceiptPrinter(job: FiscalReceiptPrintJobRow) {
@@ -1475,7 +1456,7 @@ export class DesktopPrintWorker {
     const route = (payload.route && typeof payload.route === "object" ? payload.route : {}) as Record<string, unknown>;
     const host = String(route.host ?? "").trim();
     const port = sanitizePrinterPort(route.port ?? 9100);
-    if (!host) throw new Error("NO_PRINTER_HOST");
+    if (!host) throw new PrintNotSentError("NO_PRINTER_HOST");
     const ticketText = renderFiscalReceiptTicket(job);
     const escPosPayload = buildEscPosPayload(ticketText, { align: "center" });
     let lastError: unknown = null;
@@ -1485,22 +1466,13 @@ export class DesktopPrintWorker {
         return;
       } catch (error) {
         lastError = error;
-        if (attempt >= 2 || !shouldRetryPrintLocally(error)) break;
+        if (attempt >= 2 || !(error instanceof PrintNotSentError)) break;
         await sleep(500);
       }
     }
-    throw new Error(`${normalizeError(lastError)} (target ${host}:${port})`);
-  }
-
-  private async completeFiscalReceiptJob(job: FiscalReceiptPrintJobRow, success: boolean, errorMessage: string | null) {
-    const client = this.ensureSupabaseClient();
-    const { error } = await client.rpc("fiscal_receipt_print_complete_job", {
-      p_job_id: job.id,
-      p_consumer_id: this.config.consumerId,
-      p_success: success,
-      p_error: success ? null : String(errorMessage || "PRINT_FAILED").slice(0, 500),
-    });
-    if (error) throw error;
+    const message = `${normalizeError(lastError)} (target ${host}:${port})`;
+    if (lastError instanceof PrintNotSentError) throw new PrintNotSentError(message);
+    throw new Error(message);
   }
 
   private async runTick() {
@@ -1512,6 +1484,15 @@ export class DesktopPrintWorker {
       if (!this.authState.restaurant?.id) throw new Error("Ristorante non risolto.");
       await this.heartbeatAgent(true);
       const client = this.ensureSupabaseClient();
+      // Reconcile only cloud acknowledgements. Persisted sends are never sent again.
+      for (const pending of await this.deliveryJournal.list()) {
+        if (pending.restaurantId !== this.authState.restaurant.id) continue;
+        await deliverPrintJob(this.deliveryJournal, pending, async () => {
+          throw new Error("Recovery must not send a physical ticket");
+        }, (success, errorMessage, meta) => pending.queue && pending.queue !== "kitchen"
+          ? this.completeReceiptDelivery(pending.queue, pending.jobId, success, errorMessage, meta, pending.consumerId)
+          : this.completePrintJob({ id: pending.jobId }, success, errorMessage, meta, pending.consumerId));
+      }
       const { data, error } = await client.rpc("print_claim_jobs", {
         p_restaurant_id: this.authState.restaurant.id,
         p_consumer_id: this.config.consumerId,
@@ -1532,19 +1513,25 @@ export class DesktopPrintWorker {
       for (const job of jobs) {
         try {
           const route = this.resolveRouteForJob(job, liveRoutes);
-          await this.sendToPrinter(job, route);
-          await this.completePrintJob(job, true, null);
-          this.service.stats.printed += 1;
-          this.pushLog("INFO", `Stampato job ${String(job.id).slice(0, 8)} -> ${normalizeDepartment(job.department)}`);
+          const outcome = await deliverPrintJob(this.deliveryJournal, {
+            jobId: job.id, restaurantId: this.authState.restaurant.id, consumerId: this.config.consumerId,
+          }, async () => {
+            const { error: renewError } = await client.rpc("print_renew_claim", { p_job_id: job.id, p_consumer_id: this.config.consumerId });
+            if (renewError) throw new PrintNotSentError(normalizeError(renewError));
+            await this.sendToPrinter(job, route);
+          }, (success, errorMessage, meta) => this.completePrintJob(job, success, errorMessage, meta));
+          if (outcome === "sent") {
+            this.service.stats.printed += 1;
+            this.pushLog("INFO", `Inviato job ${String(job.id).slice(0, 8)} -> ${normalizeDepartment(job.department)} (verificare uscita carta)`);
+          } else {
+            this.service.stats.failed += 1;
+            this.pushLog("ERROR", outcome === "uncertain" ? `Esito incerto job ${String(job.id).slice(0, 8)}: verificare carta prima della ristampa manuale` : `Job ${String(job.id).slice(0, 8)} non inviato; retry server`);
+          }
         } catch (jobError) {
           const message = normalizeError(jobError);
-          try {
-            await this.completePrintJob(job, false, message);
-          } catch (ackError) {
-            this.pushLog("ERROR", `Ack failed job ${String(job.id).slice(0, 8)}: ${normalizeError(ackError)}`);
-          }
           this.service.stats.failed += 1;
-          this.pushLog("ERROR", `Errore job ${String(job.id).slice(0, 8)}: ${message}`);
+          this.pushLog("ERROR", `Conferma sospesa job ${String(job.id).slice(0, 8)}: ${message}. Nessun reinvio automatico.`);
+          throw jobError;
         }
       }
 
@@ -1572,24 +1559,12 @@ export class DesktopPrintWorker {
 
             for (const job of physicalJobs) {
               try {
-                const receiptId = await this.sendToPhysicalReceiptDevice(job);
-                await this.completePhysicalReceiptJob(job, true, { receiptId });
-                this.service.stats.printed += 1;
-                this.pushLog("INFO", `Emesso scontrino RT job ${String(job.id).slice(0, 8)}`);
+                await this.deliverReceipt("physical", job, () => this.sendToPhysicalReceiptDevice(job));
               } catch (jobError) {
                 const message = normalizeError(jobError);
-                try {
-                  await this.completePhysicalReceiptJob(job, false, { error: message });
-                } catch (ackError) {
-                  if (isMissingRpcError(ackError, "physical_receipt_complete_job")) {
-                    this.physicalReceiptRpcAvailable = false;
-                    this.pushLog("WARN", "RPC physical_receipt_complete_job non trovata: applica la migrazione RT fisico.");
-                  } else {
-                    this.pushLog("ERROR", `Ack failed RT job ${String(job.id).slice(0, 8)}: ${normalizeError(ackError)}`);
-                  }
-                }
                 this.service.stats.failed += 1;
-                this.pushLog("ERROR", `Errore RT job ${String(job.id).slice(0, 8)}: ${message}`);
+                this.pushLog("ERROR", `Conferma RT sospesa ${String(job.id).slice(0, 8)}: ${message}; nessun reinvio`);
+                throw jobError;
               }
             }
           }
@@ -1622,23 +1597,12 @@ export class DesktopPrintWorker {
 
             for (const job of nfrJobs) {
               try {
-                await this.sendToNonFiscalReceiptPrinter(job);
-                await this.completeNonFiscalReceiptJob(job, true, null);
-                this.service.stats.printed += 1;
-                this.pushLog("INFO", `Stampato scontrino non fiscale ${String(job.id).slice(0, 8)}`);
+                await this.deliverReceipt("non_fiscal", job, () => this.sendToNonFiscalReceiptPrinter(job));
               } catch (jobError) {
                 const message = normalizeError(jobError);
-                try {
-                  await this.completeNonFiscalReceiptJob(job, false, message);
-                } catch (ackError) {
-                  if (isMissingRpcError(ackError, "non_fiscal_receipt_complete_job")) {
-                    this.nonFiscalReceiptRpcAvailable = false;
-                  } else {
-                    this.pushLog("ERROR", `Ack failed NFR job ${String(job.id).slice(0, 8)}: ${normalizeError(ackError)}`);
-                  }
-                }
                 this.service.stats.failed += 1;
-                this.pushLog("ERROR", `Errore NFR job ${String(job.id).slice(0, 8)}: ${message}`);
+                this.pushLog("ERROR", `Conferma NFR sospesa ${String(job.id).slice(0, 8)}: ${message}; nessun reinvio`);
+                throw jobError;
               }
             }
           }
@@ -1671,23 +1635,12 @@ export class DesktopPrintWorker {
 
             for (const job of fiscalJobs) {
               try {
-                await this.sendToFiscalReceiptPrinter(job);
-                await this.completeFiscalReceiptJob(job, true, null);
-                this.service.stats.printed += 1;
-                this.pushLog("INFO", `Stampato scontrino fiscale ${String(job.id).slice(0, 8)}`);
+                await this.deliverReceipt("fiscal", job, () => this.sendToFiscalReceiptPrinter(job));
               } catch (jobError) {
                 const message = normalizeError(jobError);
-                try {
-                  await this.completeFiscalReceiptJob(job, false, message);
-                } catch (ackError) {
-                  if (isMissingRpcError(ackError, "fiscal_receipt_print_complete_job")) {
-                    this.fiscalReceiptRpcAvailable = false;
-                  } else {
-                    this.pushLog("ERROR", `Ack failed fiscal job ${String(job.id).slice(0, 8)}: ${normalizeError(ackError)}`);
-                  }
-                }
                 this.service.stats.failed += 1;
-                this.pushLog("ERROR", `Errore fiscal job ${String(job.id).slice(0, 8)}: ${message}`);
+                this.pushLog("ERROR", `Conferma fiscale sospesa ${String(job.id).slice(0, 8)}: ${message}; nessun reinvio`);
+                throw jobError;
               }
             }
           }

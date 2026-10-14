@@ -5,6 +5,8 @@
   "type": "module",
   "main": "electron-dist/main.cjs",
   "scripts": {
+    "test": "npm run build:ts && node --test tests/*.test.cjs",
+    "typecheck": "tsc --noEmit -p tsconfig.electron.json",
     "prepare-config": "node scripts/desktop/generate-runtime-config.mjs",
     "build:ts": "node scripts/desktop/build-electron.mjs",
     "watch:ts": "node scripts/desktop/build-electron.mjs --watch",
