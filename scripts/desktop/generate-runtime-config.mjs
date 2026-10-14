@@ -40,6 +40,13 @@ async function readEnvFiles() {
   return merged;
 }
 
+function isPublicClientKey(key) {
+  if (key.startsWith("sb_publishable_")) return true;
+  try {
+    return JSON.parse(Buffer.from(key.split(".")[1] || "", "base64url").toString()).role === "anon";
+  } catch { return false; }
+}
+
 async function main() {
   const fromFiles = await readEnvFiles();
   const env = { ...fromFiles, ...process.env };
@@ -61,6 +68,9 @@ async function main() {
     throw new Error(
       "Missing VITE_SUPABASE_URL and a Supabase client key. Set VITE_SUPABASE_PUBLISHABLE_KEY or VITE_SUPABASE_ANON_KEY in .env.desktop (or .env).",
     );
+  }
+  if (!isPublicClientKey(supabaseClientKey)) {
+    throw new Error("Desktop builds require a Supabase publishable or anon client key; privileged keys are forbidden.");
   }
 
   await fs.mkdir(path.dirname(OUTPUT_PATH), { recursive: true });
