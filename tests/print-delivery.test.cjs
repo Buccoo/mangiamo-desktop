@@ -41,16 +41,16 @@ const pinJob = (table = "12", pin = "0123") => ({
   payload: { purpose: "pin_slip", restaurant_name: "Never print this header", department: "pin", table_number: table, items: [{ name: `PIN: ${pin}` }] },
 });
 
-test("PIN slip prints only the table and leading-zero PIN on one compact line", () => {
-  assert.equal(loadWorkerExports().renderTicketForTest(pinJob()), "TAV. 12  PIN: 0123");
+test("PIN slip separates the table from the readable leading-zero PIN without receipt headers", () => {
+  assert.equal(loadWorkerExports().renderTicketForTest(pinJob()), "TAV. 12\nPIN: 0123");
 });
 
 test("PIN slip bounds table width and strips printer controls and line breaks", () => {
   const render = loadWorkerExports().renderTicketForTest;
-  assert.equal(render(pinJob("\u001b\n12\r\t\u001d")), "TAV. 12  PIN: 0123");
-  assert.equal(render(pinJob("ABCDEFGHIJKLMNOPQRST", "001234")), "TAV. ABCDEFGHIJKL  PIN: 001234");
-  assert.equal(render(pinJob("一二三四五六七八九十", "001234")), "TAV. 一二三四五六  PIN: 001234");
-  assert.equal(render(pinJob("\u202e12\u200b")), "TAV. 12  PIN: 0123");
+  assert.equal(render(pinJob("\u001b\n12\r\t\u001d")), "TAV. 12\nPIN: 0123");
+  assert.equal(render(pinJob("ABCDEFGHIJKLMNOPQRST", "001234")), "TAV. ABCDEFGHIJKL\nPIN: 001234");
+  assert.equal(render(pinJob("一二三四五六七八九十", "001234")), "TAV. 一二三四五六\nPIN: 001234");
+  assert.equal(render(pinJob("\u202e12\u200b")), "TAV. 12\nPIN: 0123");
 });
 
 test("PIN slip rejects missing or malformed PIN instead of printing arbitrary content", () => {
@@ -72,13 +72,56 @@ async function actualPrintBytes(job) {
   return printed;
 }
 
-test("actual PIN transport bytes have one content line and only one feed before cutting", async () => {
+test("actual PIN bytes enlarge only the PIN and reach the same cutter position as working kitchen tickets", async () => {
   const printed = await actualPrintBytes(pinJob());
   assert.deepEqual(printed, Buffer.concat([
-    Buffer.from([0x1b, 0x40, 0x1b, 0x4d, 1, 0x1b, 0x20, 2, 0x1b, 0x61, 0, 0x1b, 0x45, 1]),
-    Buffer.from("TAV. 12  PIN: 0123\n"),
-    Buffer.from([0x1b, 0x45, 0, 0x1b, 0x64, 1, 0x1d, 0x56, 0]),
+    Buffer.from([0x1b, 0x40, 0x1b, 0x4d, 0, 0x1b, 0x20, 2, 0x1b, 0x61, 1, 0x1b, 0x45, 1]),
+    Buffer.from("TAV. 12\n"),
+    Buffer.from([0x1d, 0x21, 0x11]),
+    Buffer.from("PIN: 0123\n"),
+    Buffer.from([0x1b, 0x45, 0, 0x1d, 0x21, 0, 0x1b, 0x61, 0, 0x1b, 0x4d, 1, 0x1b, 0x64, 5, 0x1d, 0x56, 0]),
   ]));
+});
+
+test("the longest PIN fits both 58 mm and 80 mm printer widths at double size", async () => {
+  const bytes = await actualPrintBytes(pinJob("ABCDEFGHIJKLMNOPQRST", "001234"));
+  const pinStart = bytes.indexOf(Buffer.from("PIN: 001234\n"));
+  assert.ok(pinStart > 0);
+  assert.deepEqual(bytes.subarray(pinStart - 3, pinStart), Buffer.from([0x1d, 0x21, 0x11]));
+  // Font A is 12 dots plus the explicit 2-dot spacing, both doubled by GS !.
+  const pinWidthDots = "PIN: 001234".length * (12 + 2) * 2;
+  for (const printableWidthDots of [384, 576]) assert.ok(pinWidthDots <= printableWidthDots);
+  assert.equal(bytes.indexOf(Buffer.from("Never print this header")), -1);
+  assert.equal(bytes.filter((byte) => byte === 0x0a).length, 2);
+});
+
+test("the desktop sends the complete PIN and cut sequence to its explicit TCP destination", { timeout: 5000 }, async () => {
+  const net = require("node:net");
+  let received;
+  const receiving = new Promise((resolve, reject) => {
+    received = { resolve, reject };
+  });
+  const server = net.createServer((socket) => {
+    const chunks = [];
+    socket.setTimeout(3000, () => socket.destroy(new Error("fixture socket timed out")));
+    socket.on("data", (chunk) => chunks.push(chunk));
+    socket.on("end", () => received.resolve(Buffer.concat(chunks)));
+    socket.on("error", received.reject);
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  try {
+    const [, bytes] = await Promise.all([
+      loadWorkerExports().sendToPrinterForTest(pinJob(), { host: "127.0.0.1", port: server.address().port }),
+      receiving,
+    ]);
+    assert.deepEqual(bytes, await actualPrintBytes(pinJob()));
+    assert.deepEqual(bytes.subarray(-6), Buffer.from([0x1b, 0x64, 5, 0x1d, 0x56, 0]));
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test("ordinary kitchen transport keeps its existing five-line feed and cut", async () => {

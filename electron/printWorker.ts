@@ -424,7 +424,7 @@ function isPinSlipJob(job: JobRow) {
   return normalizeDepartment(job.department) === "pin" && job.payload?.purpose === "pin_slip";
 }
 
-/** Keep the entire PIN line within 32 columns, including common CJK table labels. */
+/** Bound table labels on narrow receipt paper, including common CJK labels. */
 function compactTableLabel(value: unknown) {
   const clean = String(value ?? "").slice(0, 160)
     .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim().toUpperCase();
@@ -451,7 +451,7 @@ function renderPinSlip(job: JobRow) {
   const firstItem = (items[0] || {}) as Record<string, unknown>;
   const pinRaw = String(firstItem.name || "").replace(/^PIN:\s*/i, "").trim();
   if (!/^[0-9]{4,6}$/.test(pinRaw)) throw new PrintNotSentError("INVALID_PIN_SLIP");
-  return `TAV. ${compactTableLabel(payload.table_number)}  PIN: ${pinRaw}`;
+  return `TAV. ${compactTableLabel(payload.table_number)}\nPIN: ${pinRaw}`;
 }
 
 function renderTicket(job: JobRow) {
@@ -658,13 +658,15 @@ function getLinePrintSize(line: string) {
 function buildEscPosPayload(ticketText: string, options?: { align?: "left" | "center"; pinSlip?: boolean }) {
   const ESC = 0x1b;
   const GS = 0x1d;
-  const EXTRA_FEED_LINES = options?.pinSlip ? 1 : 5;
+  // Keep the working kitchen feed/cut sequence: one line can leave a short
+  // PIN slip behind the cutter, where it cannot be collected or detached.
+  const EXTRA_FEED_LINES = 5;
   const lines = ticketText.split(/\r?\n/);
-  const alignCenter = options?.align === "center";
+  const alignCenter = options?.pinSlip || options?.align === "center";
   const chunks = [
     Buffer.from([ESC, 0x40]),
-    // Alternate ESC/POS font (Font B) for a less rigid look.
-    Buffer.from([ESC, 0x4d, 0x01]),
+    // Font A makes the PIN readable; ordinary tickets retain Font B.
+    Buffer.from([ESC, 0x4d, options?.pinSlip ? 0x00 : 0x01]),
     // Slight character spacing improves readability on thermal heads.
     Buffer.from([ESC, 0x20, 0x02]),
     // Align whole ticket block according to printer paper width.
@@ -678,7 +680,7 @@ function buildEscPosPayload(ticketText: string, options?: { align?: "left" | "ce
       chunks.push(Buffer.from([ESC, 0x45, shouldBold ? 0x01 : 0x00]));
       bold = shouldBold;
     }
-    const nextSize = options?.pinSlip ? 0x00 : getLinePrintSize(line);
+    const nextSize = getLinePrintSize(line);
     if (nextSize !== size) {
       chunks.push(Buffer.from([GS, 0x21, nextSize]));
       size = nextSize;
@@ -688,6 +690,7 @@ function buildEscPosPayload(ticketText: string, options?: { align?: "left" | "ce
   if (bold) chunks.push(Buffer.from([ESC, 0x45, 0x00]));
   if (size !== 0x00) chunks.push(Buffer.from([GS, 0x21, 0x00]));
   if (alignCenter) chunks.push(Buffer.from([ESC, 0x61, 0x00]));
+  if (options?.pinSlip) chunks.push(Buffer.from([ESC, 0x4d, 0x01]));
   chunks.push(Buffer.from([ESC, 0x64, EXTRA_FEED_LINES]));
   chunks.push(Buffer.from([GS, 0x56, 0x00]));
   return Buffer.concat(chunks);
