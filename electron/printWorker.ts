@@ -80,6 +80,7 @@ type LiveRoutes = {
   byId: Map<string, LivePrinter>;
   byDepartment: Map<string, LivePrinter>;
   defaultPrinterId: string | null;
+  pinPrinterId: string | null;
 };
 
 type DiscoverPrinter = {
@@ -419,34 +420,45 @@ function prettifyDishName(value: unknown) {
     .join(" ");
 }
 
+function isPinSlipJob(job: JobRow) {
+  return normalizeDepartment(job.department) === "pin" && job.payload?.purpose === "pin_slip";
+}
+
+/** Keep the entire PIN line within 32 columns, including common CJK table labels. */
+function compactTableLabel(value: unknown) {
+  const clean = String(value ?? "").slice(0, 160)
+    .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim().toUpperCase();
+  let result = "";
+  let columns = 0;
+  for (const char of clean) {
+    const point = char.codePointAt(0)!;
+    const width = /\p{Mark}/u.test(char) ? 0 :
+      (point >= 0x1100 && (point <= 0x115f || point === 0x2329 || point === 0x232a ||
+        (point >= 0x2e80 && point <= 0xa4cf) || (point >= 0xac00 && point <= 0xd7a3) ||
+        (point >= 0xf900 && point <= 0xfaff) || (point >= 0xfe10 && point <= 0xfe6f) ||
+        (point >= 0xff01 && point <= 0xff60) || (point >= 0xffe0 && point <= 0xffe6) ||
+        (point >= 0x1f300 && point <= 0x1faff) || point >= 0x20000)) ? 2 : 1;
+    if (columns + width > 12) break;
+    result += char;
+    columns += width;
+  }
+  return result.trim() || "-";
+}
+
 function renderPinSlip(job: JobRow) {
-  const width = 42;
   const payload = (job.payload || {}) as Record<string, unknown>;
-  const restaurantName = String(payload.restaurant_name || "").trim() || "Ristorante";
-  const tableLabel = String(payload.table_number || "").trim() || "-";
-  // Extract PIN from first item name (format: "PIN: 1234")
   const items = Array.isArray(payload.items) ? payload.items : [];
   const firstItem = (items[0] || {}) as Record<string, unknown>;
   const pinRaw = String(firstItem.name || "").replace(/^PIN:\s*/i, "").trim();
-  const center = (text: string) => {
-    if (text.length >= width) return text;
-    const pad = Math.floor((width - text.length) / 2);
-    return " ".repeat(pad) + text;
-  };
-  const lines: string[] = [];
-  lines.push(center(restaurantName));
-  lines.push("-".repeat(width));
-  lines.push(`TAVOLO: ${tableLabel.toUpperCase()}`);
-  lines.push(`PIN: ${pinRaw}`);
-  lines.push("-".repeat(width));
-  return lines.join("\n");
+  if (!/^[0-9]{4,6}$/.test(pinRaw)) throw new PrintNotSentError("INVALID_PIN_SLIP");
+  return `TAV. ${compactTableLabel(payload.table_number)}  PIN: ${pinRaw}`;
 }
 
 function renderTicket(job: JobRow) {
+  if (isPinSlipJob(job)) return renderPinSlip(job);
   const department = normalizeDepartment(
     (job.payload as Record<string, unknown>)?.department || job.department,
   );
-  if (department === "pin") return renderPinSlip(job);
 
   const width = 42;
   const payload = (job.payload || {}) as Record<string, unknown>;
@@ -643,10 +655,10 @@ function getLinePrintSize(line: string) {
   return 0x00;
 }
 
-function buildEscPosPayload(ticketText: string, options?: { align?: "left" | "center" }) {
+function buildEscPosPayload(ticketText: string, options?: { align?: "left" | "center"; pinSlip?: boolean }) {
   const ESC = 0x1b;
   const GS = 0x1d;
-  const EXTRA_FEED_LINES = 5;
+  const EXTRA_FEED_LINES = options?.pinSlip ? 1 : 5;
   const lines = ticketText.split(/\r?\n/);
   const alignCenter = options?.align === "center";
   const chunks = [
@@ -661,12 +673,12 @@ function buildEscPosPayload(ticketText: string, options?: { align?: "left" | "ce
   let bold = false;
   let size = 0x00;
   for (const line of lines) {
-    const shouldBold = isBoldLine(line);
+    const shouldBold = options?.pinSlip || isBoldLine(line);
     if (shouldBold !== bold) {
       chunks.push(Buffer.from([ESC, 0x45, shouldBold ? 0x01 : 0x00]));
       bold = shouldBold;
     }
-    const nextSize = getLinePrintSize(line);
+    const nextSize = options?.pinSlip ? 0x00 : getLinePrintSize(line);
     if (nextSize !== size) {
       chunks.push(Buffer.from([GS, 0x21, nextSize]));
       size = nextSize;
@@ -1259,6 +1271,8 @@ export class DesktopPrintWorker {
     const settings = (data?.settings && typeof data.settings === "object" ? data.settings : {}) as Record<string, unknown>;
     const printing =
       settings.printing && typeof settings.printing === "object" ? (settings.printing as Record<string, unknown>) : {};
+    const pinPrinting = settings.pin_slip_printing && typeof settings.pin_slip_printing === "object"
+      ? settings.pin_slip_printing as Record<string, unknown> : {};
     const printersRaw = Array.isArray(printing.printers) ? printing.printers : [];
     const byId = new Map<string, LivePrinter>();
     const byDepartment = new Map<string, LivePrinter>();
@@ -1289,6 +1303,7 @@ export class DesktopPrintWorker {
       byId,
       byDepartment,
       defaultPrinterId: String(printing.default_printer_id || "").trim() || null,
+      pinPrinterId: String(pinPrinting.printer_id || "").trim() || null,
     };
   }
 
@@ -1299,6 +1314,15 @@ export class DesktopPrintWorker {
     const snapshotPort = sanitizePrinterPort(snapshotRoute.port);
     const dep = normalizeDepartment(job.department);
 
+    if (isPinSlipJob(job)) {
+      // PINs have an explicit target, independent of kitchen routing and of the auto-print toggle.
+      // A removed/changed printer or an unavailable live configuration must fail closed.
+      if (!snapshotId || snapshotId !== liveRoutes?.pinPrinterId) return null;
+      const printer = liveRoutes.byId.get(snapshotId);
+      return printer?.enabled && printer.host
+        ? { id: printer.id, name: printer.name, host: printer.host, port: printer.port }
+        : null;
+    }
     if (dep === "test" && snapshotHost) {
       return { id: snapshotId, name: String(snapshotRoute.name || snapshotHost), host: snapshotHost, port: snapshotPort };
     }
@@ -1325,7 +1349,7 @@ export class DesktopPrintWorker {
     const host = String(routeOverride?.host || "").trim();
     const port = sanitizePrinterPort(routeOverride?.port);
     if (!host) throw new PrintNotSentError("NO_PRINTER_HOST");
-    const payload = buildEscPosPayload(renderTicket(job));
+    const payload = buildEscPosPayload(renderTicket(job), { pinSlip: isPinSlipJob(job) });
     let lastError: unknown = null;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {

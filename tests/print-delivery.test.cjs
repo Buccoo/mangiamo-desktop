@@ -11,7 +11,7 @@ function loadWorkerExports(netOverride) {
   const source = require("node:fs").readFileSync(path.join(__dirname, "../electron-dist/printWorker.cjs"), "utf8");
   const module = { exports: {} };
   const actualRequire = createRequire(path.join(__dirname, "../electron-dist/printWorker.cjs"));
-  vm.runInNewContext(source + "\nmodule.exports.renderTicketForTest = renderTicket; module.exports.resolveRouteForTest = DesktopPrintWorker.prototype.resolveRouteForJob; module.exports.openRawSocketForTest = openRawSocket;", {
+  vm.runInNewContext(source + "\nmodule.exports.renderTicketForTest = renderTicket; module.exports.resolveRouteForTest = DesktopPrintWorker.prototype.resolveRouteForJob; module.exports.openRawSocketForTest = openRawSocket; module.exports.sendToPrinterForTest = DesktopPrintWorker.prototype.sendToPrinter; module.exports.fetchLiveRoutesForTest = DesktopPrintWorker.prototype.fetchLivePrinterRoutes;", {
     module, exports: module.exports, require: (name) => name === "node:net" && netOverride ? netOverride : actualRequire(name), Buffer, process, __dirname: path.join(__dirname, "../electron-dist"),
   });
   return module.exports;
@@ -34,6 +34,94 @@ test("real desktop ticket contains variant quantities and additions", () => {
   assert.match(text, /SENZA Cipolla x2/);
   assert.match(text, /\+ Maionese/);
   assert.match(text, /senza wasabi/);
+});
+
+const pinJob = (table = "12", pin = "0123") => ({
+  department: "pin", route: { id: "cash", host: "outdated-host", port: 9100 },
+  payload: { purpose: "pin_slip", restaurant_name: "Never print this header", department: "pin", table_number: table, items: [{ name: `PIN: ${pin}` }] },
+});
+
+test("PIN slip prints only the table and leading-zero PIN on one compact line", () => {
+  assert.equal(loadWorkerExports().renderTicketForTest(pinJob()), "TAV. 12  PIN: 0123");
+});
+
+test("PIN slip bounds table width and strips printer controls and line breaks", () => {
+  const render = loadWorkerExports().renderTicketForTest;
+  assert.equal(render(pinJob("\u001b\n12\r\t\u001d")), "TAV. 12  PIN: 0123");
+  assert.equal(render(pinJob("ABCDEFGHIJKLMNOPQRST", "001234")), "TAV. ABCDEFGHIJKL  PIN: 001234");
+  assert.equal(render(pinJob("一二三四五六七八九十", "001234")), "TAV. 一二三四五六  PIN: 001234");
+  assert.equal(render(pinJob("\u202e12\u200b")), "TAV. 12  PIN: 0123");
+});
+
+test("PIN slip rejects missing or malformed PIN instead of printing arbitrary content", () => {
+  const render = loadWorkerExports().renderTicketForTest;
+  for (const pin of ["", "123", "1234567", "12\n34", "0123\u001bd\u0005", "12AB"]) {
+    assert.throws(() => render(pinJob("12", pin)), /INVALID_PIN_SLIP/);
+  }
+});
+
+async function actualPrintBytes(job) {
+  let printed;
+  class Socket extends EventEmitter {
+    setNoDelay() {} setTimeout() {} destroy() {}
+    connect(_port, _host, connected) { connected(); }
+    write(payload, completed) { printed = Buffer.from(payload); completed(); }
+    end(completed) { completed(); }
+  }
+  await loadWorkerExports({ Socket }).sendToPrinterForTest(job, { host: "fixture-only", port: 9100 });
+  return printed;
+}
+
+test("actual PIN transport bytes have one content line and only one feed before cutting", async () => {
+  const printed = await actualPrintBytes(pinJob());
+  assert.deepEqual(printed, Buffer.concat([
+    Buffer.from([0x1b, 0x40, 0x1b, 0x4d, 1, 0x1b, 0x20, 2, 0x1b, 0x61, 0, 0x1b, 0x45, 1]),
+    Buffer.from("TAV. 12  PIN: 0123\n"),
+    Buffer.from([0x1b, 0x45, 0, 0x1b, 0x64, 1, 0x1d, 0x56, 0]),
+  ]));
+});
+
+test("ordinary kitchen transport keeps its existing five-line feed and cut", async () => {
+  const printed = await actualPrintBytes({ department: "sushi", payload: { items: [{ name: "Nigiri", quantity: 1 }] } });
+  assert.deepEqual(printed.subarray(-6), Buffer.from([0x1b, 0x64, 5, 0x1d, 0x56, 0]));
+  assert.match(printed.toString(), /COMANDA SUSHI/);
+});
+
+test("a kitchen department named pin remains a food ticket on its kitchen printer", async () => {
+  const job = { department: "pin", order_id: "food-order", payload: { department: "pin", items: [{ name: "Nigiri", quantity: 1 }] } };
+  const printed = await actualPrintBytes(job);
+  assert.match(printed.toString(), /COMANDA PIN/);
+  assert.match(printed.toString(), /1x Nigiri/);
+  assert.deepEqual(printed.subarray(-6), Buffer.from([0x1b, 0x64, 5, 0x1d, 0x56, 0]));
+  const kitchen = { id: "kitchen", host: "kitchen", port: 9100, enabled: true };
+  const routes = { byId: new Map([["kitchen", kitchen]]), byDepartment: new Map([["pin", kitchen]]), pinPrinterId: "cash" };
+  assert.equal(loadWorkerExports().resolveRouteForTest(job, routes)?.id, "kitchen");
+});
+
+test("PIN routing uses only the currently configured printer even if automatic printing is off", () => {
+  const resolve = loadWorkerExports().resolveRouteForTest;
+  const cash = { id: "cash", host: "current-cash", port: 9101, enabled: true };
+  const bar = { id: "bar", host: "bar", port: 9100, enabled: true };
+  const routes = { byId: new Map([["cash", cash], ["bar", bar]]), byDepartment: new Map([["pin", bar]]), defaultPrinterId: "bar", pinPrinterId: "cash" };
+  assert.equal(resolve(pinJob(), routes)?.host, "current-cash");
+  assert.equal(resolve(pinJob(), routes)?.port, 9101);
+  for (const unavailable of [
+    null,
+    { ...routes, pinPrinterId: "bar" },
+    { ...routes, pinPrinterId: null },
+    { ...routes, byId: new Map([["bar", bar]]) },
+    { ...routes, byId: new Map([["cash", { ...cash, enabled: false }]]) },
+    { ...routes, byId: new Map([["cash", { ...cash, host: "" }]]) },
+  ]) assert.equal(resolve(pinJob(), unavailable), null);
+  assert.equal(resolve({ ...pinJob(), route: { host: "snapshot-without-id" } }, routes), null);
+});
+
+test("live PIN routing reads the top-level PIN printer independently of the automatic toggle", async () => {
+  const fetchRoutes = loadWorkerExports().fetchLiveRoutesForTest;
+  const routes = await fetchRoutes.call({ ensureSupabaseClient: () => ({ from: () => ({ select: () => ({ eq: () => ({ maybeSingle: async () => ({
+    data: { settings: { pin_slip_printing: { enabled: false, printer_id: "cash" }, printing: { printers: [{ id: "cash", host: "cash-host" }] } } }, error: null,
+  }) }) }) }) }) }, "fixture-restaurant");
+  assert.equal(routes.pinPrinterId, "cash");
 });
 
 test("department routing follows the live mapping without default-printer fallback", () => {
