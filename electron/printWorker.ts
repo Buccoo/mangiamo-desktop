@@ -243,39 +243,6 @@ function normalizePaymentMethod(value: unknown) {
   return method === "card" ? "card" : "cash";
 }
 
-function toCents(value: unknown) {
-  const amount = Number(value);
-  if (!Number.isFinite(amount) || amount <= 0) return 0;
-  return Math.max(0, Math.round(amount * 100));
-}
-
-function escapeXml(value: unknown) {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&apos;");
-}
-
-function buildEpsonFiscalReceiptXml(payload: Record<string, unknown>) {
-  const tableNumber = String(payload?.table_number ?? "").trim() || "-";
-  const paymentMethod = normalizePaymentMethod(payload?.payment_method);
-  const paymentLabel = paymentMethod === "card" ? "ELETTRONICO" : "CONTANTI";
-  const cents = Math.max(1, toCents(payload?.total_amount));
-  const description = `Mangiamo Tavolo ${tableNumber}`;
-
-  return (
-    `<?xml version="1.0" encoding="UTF-8"?>\n` +
-    `<FPMessage>\n` +
-    `  <beginFiscalReceipt operator="1"/>\n` +
-    `  <printRecItem description="${escapeXml(description)}" price="${cents}" quantity="1" department="1" vatCode="1"/>\n` +
-    `  <printRecTotal description="${paymentLabel}" payment="${cents}"/>\n` +
-    `  <endFiscalReceipt/>\n` +
-    `</FPMessage>`
-  );
-}
-
 function buildNonFiscalTestXml() {
   const now = new Date();
   const dateStr = now.toLocaleDateString("it-IT", { day: "2-digit", month: "2-digit", year: "numeric" });
@@ -295,21 +262,6 @@ function buildNonFiscalTestXml() {
     `  <endNonFiscal/>\n` +
     `</FPMessage>`
   );
-}
-
-function extractReceiptIdFromResponse(responseText: string) {
-  const text = String(responseText || "");
-  if (!text) return null;
-  const patterns = [
-    /receipt[_\s-]?id["'\s:=]+([A-Za-z0-9._:/-]+)/i,
-    /document[_\s-]?number["'\s:=]+([A-Za-z0-9._:/-]+)/i,
-    /progressive[_\s-]?number["'\s:=]+([A-Za-z0-9._:/-]+)/i,
-  ];
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    if (match?.[1]) return match[1].trim();
-  }
-  return null;
 }
 
 function normalizeDepartment(value: unknown) {
@@ -559,6 +511,14 @@ function renderFiscalReceiptTicket(job: FiscalReceiptPrintJobRow) {
   const schemaRoot = (payload.schema && typeof payload.schema === "object" ? payload.schema : {}) as Record<string, unknown>;
   const ekabs = (schemaRoot.ekabs_v0 && typeof schemaRoot.ekabs_v0 === "object" ? schemaRoot.ekabs_v0 : {}) as Record<string, unknown>;
   const head = (ekabs.head && typeof ekabs.head === "object" ? ekabs.head : {}) as Record<string, unknown>;
+  const proof = (payload.fiscal_proof && typeof payload.fiscal_proof === "object" ? payload.fiscal_proof : {}) as Record<string, unknown>;
+  const compliance = String(proof.compliance_number ?? "");
+  if (proof.version !== 1 || !String(proof.operation_id ?? "").trim() || !String(proof.record_id ?? "").trim() ||
+    proof.provider_state !== "COMPLETED" || proof.provider_mode !== "FINISHED" ||
+    !["test", "live"].includes(String(proof.environment)) || !/^DCW\d+\/\d+-\d+$/.test(compliance) ||
+    !payload.payment_event_id || proof.source_event_id !== payload.payment_event_id || head.number !== compliance) {
+    throw new PrintNotSentError("FISCAL_COPY_PROOF_REQUIRED: copia sospesa; recuperare il documento AdE verificato dal conto.");
+  }
   const seller = (head.seller && typeof head.seller === "object" ? head.seller : {}) as Record<string, unknown>;
   const data = (ekabs.data && typeof ekabs.data === "object" ? ekabs.data : {}) as Record<string, unknown>;
   const linesData = Array.isArray(data.lines) ? data.lines : [];
@@ -583,7 +543,8 @@ function renderFiscalReceiptTicket(job: FiscalReceiptPrintJobRow) {
   lines.push("=".repeat(width));
   lines.push(center(restaurantName));
   lines.push("=".repeat(width));
-  lines.push(center("SCONTRINO FISCALE"));
+  lines.push(center("COPIA DOCUMENTO COMMERCIALE"));
+  if (proof.environment === "test") lines.push(center("TEST - NON VALIDO FISCALMENTE"));
   lines.push("-".repeat(width));
   lines.push(`DOC: ${receiptNumber}`);
   if (paidAt) lines.push(`DATA: ${paidAt}`);
@@ -609,20 +570,19 @@ function renderFiscalReceiptTicket(job: FiscalReceiptPrintJobRow) {
 
   if (vatAmounts.length > 0) {
     lines.push("-".repeat(width));
-    for (const rawVat of vatAmounts) {
-      const vat = (rawVat && typeof rawVat === "object" ? rawVat : {}) as Record<string, unknown>;
-      const percentage = String(vat.percentage || "0").trim() || "0";
-      const amount = formatCurrency(vat.vat || 0);
-      lines.push(padRow(`IVA ${percentage}%`, amount, width));
-    }
+    const rates = vatAmounts.map(rawVat => String((rawVat as Record<string, unknown>).percentage ?? "").trim()).filter(Boolean);
+    lines.push(...wrapText(`Aliquote IVA: ${rates.map(rate => `${rate}%`).join(", ")}`, width));
+    // The official total is computed from eight-decimal entries. Summing
+    // separately rounded two-decimal VAT groups can differ by one cent.
+    lines.push(padRow("IVA totale", formatCurrency(data.total_vat_amount || 0), width));
   }
 
   lines.push("-".repeat(width));
   lines.push(padRow("TOTALE", formatCurrency(totalAmount || 0), width));
   lines.push(padRow("Pagamento", paymentLabel, width));
   lines.push("=".repeat(width));
-  lines.push(center("Documento fiscale emesso"));
-  lines.push(center("via Fiskaly eReceipt"));
+  lines.push(center(proof.environment === "test" ? "Ambiente di prova Fiskaly SIGN IT" : "Documento registrato via Fiskaly SIGN IT"));
+  lines.push(center("PDF originale: consulta il conto"));
   lines.push("=".repeat(width));
   return lines.join("\n");
 }
@@ -1386,38 +1346,16 @@ export class DesktopPrintWorker {
     if (error) throw error;
   }
 
-  private async postPhysicalReceipt(route: Record<string, unknown>, payload: Record<string, unknown>) {
-    const host = String(route.host ?? "").trim();
-    const brand = normalizePhysicalBrand(route.brand);
-    const port = sanitizePhysicalPort(route.port, brand);
-    const apiPath = sanitizePhysicalPath(route.api_path, brand);
-    if (!host) throw new PrintNotSentError("PHYSICAL_RT_HOST_MISSING");
-
-    const endpoint = `http://${host}:${port}${apiPath}`;
-    const body = buildEpsonFiscalReceiptXml(payload);
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20000);
-
-    try {
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "content-type": "application/xml; charset=utf-8",
-        },
-        body,
-        signal: controller.signal,
-      });
-      const responseText = await response.text().catch(() => "");
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${responseText || "RT response error"}`);
-      }
-      if (/\b(error|fault|ko)\b/i.test(responseText)) {
-        throw new Error(responseText.slice(0, 500) || "RT_ERROR_RESPONSE");
-      }
-      return extractReceiptIdFromResponse(responseText);
-    } finally {
-      clearTimeout(timeout);
+  private async postPhysicalReceipt(route: Record<string, unknown>, payload: Record<string, unknown>): Promise<string> {
+    const brand = String(route.brand ?? "").trim().toLowerCase();
+    if (brand !== "epson") {
+      throw new PrintNotSentError("PHYSICAL_RT_BRAND_UNSUPPORTED: emissione fiscale RT non disponibile per questo marchio; adapter non validato.");
     }
+    // No fiscal adapter is qualified in this release. The legacy total-only
+    // payload cannot prove tax treatment or the device's programmed departments.
+    // Payload flags cannot substitute for qualification. Reject before any I/O.
+    void payload;
+    throw new PrintNotSentError("PHYSICAL_RT_FISCAL_MAPPING_UNVERIFIED: emissione fiscale RT disabilitata; mancano adapter Epson validato, dettaglio fiscale e verifica dei reparti/IVA della stampante.");
   }
 
   private async sendToPhysicalReceiptDevice(job: PhysicalReceiptJobRow) {
@@ -1426,7 +1364,10 @@ export class DesktopPrintWorker {
 
     // A POST may have emitted the document even if its response was lost.
     const receiptId = await this.postPhysicalReceipt(route, payload);
-    return receiptId || `RT-${String(job.id || "").slice(0, 8)}-${Date.now()}`;
+    if (typeof receiptId !== "string" || !receiptId.trim()) {
+      throw new Error("PHYSICAL_RT_EMISSION_UNPROVEN: identificativo fiscale autorevole assente; verificare il dispositivo prima di una ristampa manuale.");
+    }
+    return receiptId;
   }
 
   private async completeReceiptDelivery(queue: Exclude<PrintDelivery.PrintQueue, "kitchen">, jobId: string, success: boolean, errorMessage: string | null, meta: Record<string, unknown>, consumerId = this.config.consumerId) {

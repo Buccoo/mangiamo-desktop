@@ -58,13 +58,18 @@ type Acknowledge = (success: boolean, error: string | null, meta: { delivery_sta
 /** A TCP write is transport evidence, not proof that paper was produced. */
 export async function deliverPrintJob(journal: LocalPrintJournal, operation: PrintOperation, send: () => Promise<void | string>, acknowledge: Acknowledge) {
   const existing = (await journal.list()).find((entry) => sameOperation(entry, operation));
-  if (existing?.state === "sent") {
+  // Older physical-RT workers accepted HTTP 200 and invented receipt IDs.
+  // Their journal is not fiscal evidence: preserve uncertainty without resending.
+  if (existing?.state === "sent" && operation.queue !== "physical") {
     await acknowledge(true, null, { delivery_state: "sent", delivery_generation: operation.generation || 0, ...(existing.receiptId ? { receipt_id: existing.receiptId } : {}) });
     await journal.remove(operation);
     return "sent" as const;
   }
   if (existing) {
-    const error = `DELIVERY_UNCERTAIN: ${existing.error || "invio interrotto; verificare carta prima di una ristampa manuale"}`;
+    const reason = existing.state === "sent" && operation.queue === "physical"
+      ? "PHYSICAL_RT_LEGACY_EMISSION_UNPROVEN: registro precedente privo di prova fiscale; verificare il dispositivo prima di una ristampa manuale"
+      : existing.error || "invio interrotto; verificare carta prima di una ristampa manuale";
+    const error = `DELIVERY_UNCERTAIN: ${reason}`;
     await journal.set(operation, "uncertain", error);
     await acknowledge(false, error, { delivery_state: "uncertain", delivery_generation: operation.generation || 0 });
     await journal.remove(operation);

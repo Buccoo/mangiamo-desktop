@@ -291,16 +291,18 @@ test("corrupt delivery journal fails closed before transport", async () => withJ
   assert.equal(sends, 0);
 }));
 
-test("physical receipt id survives acknowledgement loss and restart", async () => withJournal(async ({ LocalPrintJournal, deliverPrintJob }, filename) => {
+test("legacy physical receipt evidence cannot acknowledge fiscal success after restart", async () => withJournal(async ({ LocalPrintJournal, deliverPrintJob }, filename) => {
   const receipt = { ...operation, queue: "physical" };
-  await assert.rejects(deliverPrintJob(new LocalPrintJournal(filename), receipt, async () => "RT-fixture-123", async () => { throw new Error("offline ack"); }));
+  await new LocalPrintJournal(filename).set(receipt, "sent", undefined, "RT-fixture-123");
   const stored = (await new LocalPrintJournal(filename).list())[0];
   assert.equal(stored.queue, "physical");
   assert.equal(stored.receiptId, "RT-fixture-123");
   let sends = 0;
   await deliverPrintJob(new LocalPrintJournal(filename), receipt, async () => { sends++; }, async (success, error, meta) => {
-    assert.equal(success, true);
-    assert.equal(meta.receipt_id, "RT-fixture-123");
+    assert.equal(success, false);
+    assert.match(error, /^DELIVERY_UNCERTAIN:/);
+    assert.equal(meta.delivery_state, "uncertain");
+    assert.equal(meta.receipt_id, undefined);
   });
   assert.equal(sends, 0);
 }));
