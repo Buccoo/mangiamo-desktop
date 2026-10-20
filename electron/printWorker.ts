@@ -47,6 +47,7 @@ type JobRow = {
   payload: Record<string, unknown> | null;
   route: Record<string, unknown> | null;
   created_at: string;
+  serviceClaimed?: boolean;
 };
 
 type PhysicalReceiptJobRow = {
@@ -293,7 +294,7 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function openRawSocket(host: string, port: number, payload: Buffer, timeoutMs = 25000) {
+function openRawSocket(host: string, port: number, payload: Buffer, timeoutMs = 25000, beforeWrite?: () => Promise<void>) {
   return new Promise<void>((resolve, reject) => {
     const socket = new net.Socket();
     let done = false;
@@ -310,14 +311,16 @@ function openRawSocket(host: string, port: number, payload: Buffer, timeoutMs = 
     socket.once("error", (error) => complete(error));
     socket.once("timeout", () => complete(new Error("Timeout stampante")));
     socket.connect(port, host, () => {
-      writeStarted = true;
-      socket.write(payload, (error) => {
-        if (error) {
-          complete(error);
-          return;
-        }
-        socket.end(() => complete(null));
-      });
+      const write = () => {
+        if (done) return;
+        writeStarted = true;
+        socket.write(payload, (error) => {
+          if (error) { complete(error); return; }
+          socket.end(() => complete(null));
+        });
+      };
+      if (beforeWrite) void beforeWrite().then(write).catch(error => complete(new Error(normalizeError(error))));
+      else write();
     });
     socket.once("close", (hadError) => {
       if (hadError) return;
@@ -406,7 +409,51 @@ function renderPinSlip(job: JobRow) {
   return `TAV. ${compactTableLabel(payload.table_number)}\nPIN: ${pinRaw}`;
 }
 
+/** A marker is a contract, including unknown/null markers; never a legacy hint. */
+function serviceTicketMetadata(job: JobRow): { intent: "information" | "prepare" | "cancel"; groupId: string; revision: number } | null {
+  const payload = job.payload;
+  const marked = payload != null && ["service_protocol_version", "service_group_id", "service_batch_id", "execution_fence"].some(key => Object.prototype.hasOwnProperty.call(payload, key));
+  if (!marked && !job.serviceClaimed) return null;
+  const invalid = () => { throw new PrintNotSentError("INVALID_SERVICE_PRINT_PROTOCOL"); };
+  if (!payload || payload.service_protocol_version !== 1) return invalid();
+  const uuid = (value: unknown) => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+  const text = (value: unknown, max: number) => typeof value === "string" && value.trim().length > 0 && value.length <= max && !/[\p{Cc}\p{Cf}]/u.test(value);
+  const quantity = (value: unknown) => typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 999;
+  if (!uuid(payload.service_group_id) || !uuid(payload.session_id) || !uuid(payload.order_id) ||
+    !Number.isSafeInteger(payload.execution_revision) || Number(payload.execution_revision) < 1 ||
+    !text(payload.dedupe_key, 240) || !["information", "prepare", "cancel"].includes(String(payload.intent)) ||
+    payload.purpose === "pin_slip" || [normalizeDepartment(job.department), normalizeDepartment(payload.department)].some(department => ["pin", "cash"].includes(department)) ||
+    !Array.isArray(payload.items)) return invalid();
+  for (const rawItem of payload.items) {
+    if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) return invalid();
+    const item = rawItem as Record<string, unknown>;
+    if (!quantity(item.quantity) || !text(item.name, 1024) || (item.order_item_id !== undefined && !uuid(item.order_item_id))) return invalid();
+  }
+  if (payload.intent === "prepare") {
+    const timestamp = (value: unknown) => {
+      if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(value) || !Number.isFinite(Date.parse(value))) return false;
+      const [year, month, day, hour, minute, second] = value.slice(0, 19).split(/[-T:]/).map(Number);
+      return year >= 1 && month >= 1 && month <= 12 && day >= 1 && day <= new Date(Date.UTC(year + 400, month, 0)).getUTCDate() && hour <= 23 && minute <= 59 && second <= 59;
+    };
+    if (!uuid(payload.service_batch_id) || !uuid(payload.execution_fence) || !timestamp(payload.not_before) || !timestamp(payload.expires_at) ||
+      Date.parse(String(payload.expires_at)) <= Date.parse(String(payload.not_before)) || payload.items.length !== 1 ||
+      !uuid((payload.items[0] as Record<string, unknown>).order_item_id)) return invalid();
+  }
+  // No comparison to the device clock: the service renewal RPC is authority for admission/TTL.
+  return { intent: payload.intent as "information" | "prepare" | "cancel", groupId: String(payload.service_group_id), revision: Number(payload.execution_revision) };
+}
+
+function serviceTicketHeader(service: NonNullable<ReturnType<typeof serviceTicketMetadata>>) {
+  const labels = {
+    information: ["INFORMAZIONE - ATTENDI IL VIA", "NON INIZIARE LA PREPARAZIONE"],
+    prepare: ["VIA PREPARAZIONE", "Confermare avvio sul KDS"],
+    cancel: ["ANNULLAMENTO - VERIFICA CON LO STAFF", "Non annulla lavorazioni gia iniziate"],
+  };
+  return [...labels[service.intent], `USCITA ${service.groupId.slice(0, 8)} REV.${service.revision}`];
+}
+
 function renderTicket(job: JobRow) {
+  const service = serviceTicketMetadata(job);
   if (isPinSlipJob(job)) return renderPinSlip(job);
   const department = normalizeDepartment(
     (job.payload as Record<string, unknown>)?.department || job.department,
@@ -419,7 +466,7 @@ function renderTicket(job: JobRow) {
   const tableLabel = String(payload.table_number || "").trim() || "-";
   const orderLabel = payload.order_number != null ? `#${String(payload.order_number)}` : "#-";
   const createdAt = formatTimestamp(payload.created_at || job.created_at);
-  const lines: string[] = [];
+  const lines: string[] = service ? serviceTicketHeader(service) : [];
   lines.push(`COMANDA ${department.toUpperCase()} ${orderLabel}`);
   lines.push(`TAVOLO: ${tableLabel.toUpperCase()}`);
   if (createdAt) lines.push(`DATA: ${createdAt}`);
@@ -832,6 +879,8 @@ export class DesktopPrintWorker {
   private physicalReceiptRpcAvailable = true;
   private nonFiscalReceiptRpcAvailable = true;
   private fiscalReceiptRpcAvailable = true;
+  private serviceProtocolRpcAvailable = true;
+  private serviceProtocolRegistered = false;
   private boundWindow: BrowserWindow | null = null;
   private service = {
     running: false,
@@ -1193,6 +1242,7 @@ export class DesktopPrintWorker {
   }
 
   private async heartbeatAgent(isActive: boolean) {
+    this.serviceProtocolRegistered = false;
     if (!this.authState.restaurant?.id) return;
     try {
       const client = this.ensureSupabaseClient();
@@ -1212,6 +1262,15 @@ export class DesktopPrintWorker {
         p_is_active: isActive,
       });
       if (error) throw error;
+      if (isActive && this.serviceProtocolRpcAvailable) {
+        const { error: protocolError } = await client.rpc("printing_register_service_protocol", {
+          p_agent_id: this.config.consumerId, p_protocol_version: 1, p_restaurant_id: this.authState.restaurant.id,
+        });
+        if (protocolError) {
+          if (isMissingRpcError(protocolError, "printing_register_service_protocol")) this.disableServiceProtocol();
+          else this.pushLog("WARN", `Registrazione protocollo servizio fallita: ${normalizeError(protocolError)}`);
+        } else this.serviceProtocolRegistered = true;
+      }
       const nextAssigned =
         String((data as Record<string, unknown> | null)?.printer_id || "").trim() || serverAssigned || null;
       if (this.service.assignedPrinterId !== nextAssigned) {
@@ -1221,6 +1280,12 @@ export class DesktopPrintWorker {
     } catch (error) {
       this.pushLog("WARN", `Heartbeat agente fallito: ${normalizeError(error)}`);
     }
+  }
+
+  private disableServiceProtocol() {
+    if (this.serviceProtocolRpcAvailable) this.pushLog("WARN", "Protocollo servizio non disponibile sul server: bridge in sola stampa legacy.");
+    this.serviceProtocolRpcAvailable = false;
+    this.serviceProtocolRegistered = false;
   }
 
   private async fetchLivePrinterRoutes(restaurantId: string): Promise<LiveRoutes> {
@@ -1308,7 +1373,8 @@ export class DesktopPrintWorker {
     return null;
   }
 
-  private async sendToPrinter(job: JobRow, routeOverride: { host: string; port: number } | null) {
+  private async sendToPrinter(job: JobRow, routeOverride: { host: string; port: number } | null, beforeWrite?: () => Promise<void>) {
+    if (serviceTicketMetadata(job) && !beforeWrite) throw new PrintNotSentError("SERVICE_PRINT_RENEWAL_REQUIRED");
     const host = String(routeOverride?.host || "").trim();
     const port = sanitizePrinterPort(routeOverride?.port);
     if (!host) throw new PrintNotSentError("NO_PRINTER_HOST");
@@ -1316,7 +1382,7 @@ export class DesktopPrintWorker {
     let lastError: unknown = null;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
-        await openRawSocket(host, port, payload);
+        await openRawSocket(host, port, payload, 25000, beforeWrite);
         return;
       } catch (error) {
         lastError = error;
@@ -1468,7 +1534,17 @@ export class DesktopPrintWorker {
         p_limit: this.config.claimLimit,
       });
       if (error) throw error;
-      const jobs = (Array.isArray(data) ? data : []) as JobRow[];
+      let jobs = (Array.isArray(data) ? data : []) as JobRow[];
+      if (jobs.length === 0 && this.serviceProtocolRegistered && this.serviceProtocolRpcAvailable) {
+        const { data: serviceData, error: serviceError } = await client.rpc("print_claim_service_jobs", {
+          p_consumer_id: this.config.consumerId, p_limit: this.config.claimLimit,
+          p_protocol_version: 1, p_restaurant_id: this.authState.restaurant.id,
+        });
+        if (serviceError) {
+          if (isMissingRpcError(serviceError, "print_claim_service_jobs")) this.disableServiceProtocol();
+          else throw serviceError;
+        } else jobs = (Array.isArray(serviceData) ? serviceData : []).map(row => ({ ...row, serviceClaimed: true })) as JobRow[];
+      }
       this.service.stats.claimed += jobs.length;
       if (jobs.length > 0) this.pushLog("INFO", `Claimati ${jobs.length} job`);
 
@@ -1485,9 +1561,23 @@ export class DesktopPrintWorker {
           const outcome = await deliverPrintJob(this.deliveryJournal, {
             jobId: job.id, restaurantId: this.authState.restaurant.id, consumerId: this.config.consumerId,
           }, async () => {
-            const { error: renewError } = await client.rpc("print_renew_claim", { p_job_id: job.id, p_consumer_id: this.config.consumerId });
-            if (renewError) throw new PrintNotSentError(normalizeError(renewError));
-            await this.sendToPrinter(job, route);
+            const service = serviceTicketMetadata(job);
+            const renewService = async () => {
+              if (!this.serviceProtocolRpcAvailable) throw new PrintNotSentError("SERVICE_PRINT_RENEWAL_REQUIRED");
+              const { data: renewed, error: renewError } = await client.rpc("print_renew_service_claim", {
+                p_consumer_id: this.config.consumerId, p_job_id: job.id, p_protocol_version: 1,
+              });
+              if (renewError) {
+                if (isMissingRpcError(renewError, "print_renew_service_claim")) this.disableServiceProtocol();
+                throw new PrintNotSentError(normalizeError(renewError));
+              }
+              if (!renewed || renewed.ok !== true || !Number.isFinite(renewed.lease_seconds) || renewed.lease_seconds <= 0) throw new PrintNotSentError("SERVICE_PRINT_RENEWAL_REQUIRED");
+            };
+            if (!service) {
+              const { error: renewError } = await client.rpc("print_renew_claim", { p_job_id: job.id, p_consumer_id: this.config.consumerId });
+              if (renewError) throw new PrintNotSentError(normalizeError(renewError));
+            }
+            await this.sendToPrinter(job, route, service ? renewService : undefined);
           }, (success, errorMessage, meta) => this.completePrintJob(job, success, errorMessage, meta));
           if (outcome === "sent") {
             this.service.stats.printed += 1;
