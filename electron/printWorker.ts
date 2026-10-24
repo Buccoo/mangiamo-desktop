@@ -8,6 +8,8 @@ import type { BrowserWindow } from "electron";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type * as PrintDelivery from "./printDelivery";
 const { LocalPrintJournal, PrintNotSentError, deliverPrintJob } = require("./printDelivery.cjs") as typeof PrintDelivery;
+import type * as KitchenTicket from './kitchenTicket';
+const { renderKitchenTicketCore, buildKitchenEscPos } = require('./kitchenTicket.cjs') as typeof KitchenTicket;
 
 type RuntimeConfig = {
   VITE_SUPABASE_URL: string;
@@ -78,6 +80,7 @@ type LivePrinter = {
 };
 
 type LiveRoutes = {
+  kitchenLayout?: unknown;
   byId: Map<string, LivePrinter>;
   byDepartment: Map<string, LivePrinter>;
   defaultPrinterId: string | null;
@@ -452,46 +455,23 @@ function serviceTicketHeader(service: NonNullable<ReturnType<typeof serviceTicke
   return [...labels[service.intent], `USCITA ${service.groupId.slice(0, 8)} REV.${service.revision}`];
 }
 
-function renderTicket(job: JobRow) {
+function renderAnnotatedKitchenTicket(job: JobRow, layout?: unknown) {
   const service = serviceTicketMetadata(job);
-  if (isPinSlipJob(job)) return renderPinSlip(job);
-  const department = normalizeDepartment(
-    (job.payload as Record<string, unknown>)?.department || job.department,
-  );
-
-  const width = 42;
-  const payload = (job.payload || {}) as Record<string, unknown>;
-  const items = Array.isArray(payload.items) ? payload.items : [];
-  const restaurantName = String(payload.restaurant_name || "").trim() || "Ristorante";
-  const tableLabel = String(payload.table_number || "").trim() || "-";
-  const orderLabel = payload.order_number != null ? `#${String(payload.order_number)}` : "#-";
-  const createdAt = formatTimestamp(payload.created_at || job.created_at);
-  const lines: string[] = service ? serviceTicketHeader(service) : [];
-  lines.push(`COMANDA ${department.toUpperCase()} ${orderLabel}`);
-  lines.push(`TAVOLO: ${tableLabel.toUpperCase()}`);
-  if (createdAt) lines.push(`DATA: ${createdAt}`);
-  lines.push("-".repeat(width));
-  for (const rawItem of items) {
-    const item = (rawItem || {}) as Record<string, unknown>;
-    const qty = Math.max(1, Number(item.quantity) || 1);
-    const label = `${qty}x ${prettifyDishName(item.name)}`;
-    for (const chunk of wrapText(label, width)) lines.push(chunk);
-    for (const rawModifier of Array.isArray(item.modifiers) ? item.modifiers : []) {
-      const modifier = (rawModifier || {}) as Record<string, unknown>;
-      const name = String(modifier.name || "").trim();
-      if (!name) continue;
-      const modifierQty = Math.max(1, Math.trunc(Number(modifier.qty) || 1));
-      const modifierType = String(modifier.modifier_type || "variant").trim().toLowerCase();
-      const prefix = ["remove", "removal"].includes(modifierType) ? "SENZA " : ["extra", "addon"].includes(modifierType) ? "+ " : "Variante: ";
-      for (const chunk of wrapText(`${prefix}${name}${modifierQty > 1 ? ` x${modifierQty}` : ""}`, width - 2)) lines.push(` ${chunk}`);
-    }
-    const notes = String(item.notes || "").trim();
-    if (notes) for (const chunk of wrapText(`Nota: ${notes}`, width - 2)) lines.push(` ${chunk}`);
-  }
-  lines.push(`-- ${restaurantName} --`);
-  return lines.join("\n");
+  const payload = job.payload ?? {};
+  return renderKitchenTicketCore({ ...payload,
+    department: String(payload.department || job.department || "cucina"),
+    created_at: String(payload.created_at || job.created_at || ""),
+  } as KitchenTicket.KitchenTicketPayload, {
+    layout: layout ?? (payload.layout as Record<string, unknown> | undefined)?.kitchen ?? payload.layout,
+    serviceHeadings: service ? serviceTicketHeader(service) : [],
+  });
 }
 
+function renderTicket(job: JobRow, layout?: unknown) {
+  serviceTicketMetadata(job);
+  if (isPinSlipJob(job)) return renderPinSlip(job);
+  return renderAnnotatedKitchenTicket(job, layout).text;
+}
 function formatCurrency(value: unknown) {
   const n = Number(value);
   if (!Number.isFinite(n)) return "EUR 0,00";
@@ -1332,6 +1312,7 @@ export class DesktopPrintWorker {
       byDepartment,
       defaultPrinterId: String(printing.default_printer_id || "").trim() || null,
       pinPrinterId: String(pinPrinting.printer_id || "").trim() || null,
+      kitchenLayout: (printing.ticket_layout as Record<string, unknown> | undefined)?.kitchen,
     };
   }
 
@@ -1373,12 +1354,15 @@ export class DesktopPrintWorker {
     return null;
   }
 
-  private async sendToPrinter(job: JobRow, routeOverride: { host: string; port: number } | null, beforeWrite?: () => Promise<void>) {
+  private async sendToPrinter(job: JobRow, routeOverride: { host: string; port: number } | null, beforeWrite?: () => Promise<void>, kitchenLayout?: unknown) {
     if (serviceTicketMetadata(job) && !beforeWrite) throw new PrintNotSentError("SERVICE_PRINT_RENEWAL_REQUIRED");
     const host = String(routeOverride?.host || "").trim();
     const port = sanitizePrinterPort(routeOverride?.port);
     if (!host) throw new PrintNotSentError("NO_PRINTER_HOST");
-    const payload = buildEscPosPayload(renderTicket(job), { pinSlip: isPinSlipJob(job) });
+    const layout = kitchenLayout ?? (job.payload?.layout as Record<string, unknown> | undefined)?.kitchen ?? job.payload?.layout;
+    const payload = isPinSlipJob(job)
+      ? buildEscPosPayload(renderPinSlip(job), { pinSlip: true })
+      : Buffer.from(buildKitchenEscPos(renderAnnotatedKitchenTicket(job, layout).lines, layout));
     let lastError: unknown = null;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
@@ -1561,6 +1545,7 @@ export class DesktopPrintWorker {
           const outcome = await deliverPrintJob(this.deliveryJournal, {
             jobId: job.id, restaurantId: this.authState.restaurant.id, consumerId: this.config.consumerId,
           }, async () => {
+            if (!liveRoutes && !isPinSlipJob(job)) throw new PrintNotSentError('KITCHEN_LAYOUT_UNAVAILABLE');
             const service = serviceTicketMetadata(job);
             const renewService = async () => {
               if (!this.serviceProtocolRpcAvailable) throw new PrintNotSentError("SERVICE_PRINT_RENEWAL_REQUIRED");
@@ -1577,7 +1562,7 @@ export class DesktopPrintWorker {
               const { error: renewError } = await client.rpc("print_renew_claim", { p_job_id: job.id, p_consumer_id: this.config.consumerId });
               if (renewError) throw new PrintNotSentError(normalizeError(renewError));
             }
-            await this.sendToPrinter(job, route, service ? renewService : undefined);
+            await this.sendToPrinter(job, route, service ? renewService : undefined, liveRoutes?.kitchenLayout);
           }, (success, errorMessage, meta) => this.completePrintJob(job, success, errorMessage, meta));
           if (outcome === "sent") {
             this.service.stats.printed += 1;

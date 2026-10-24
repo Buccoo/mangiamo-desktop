@@ -22,6 +22,8 @@ const targets = [
   },
 ];
 
+targets.push({ entryPoints: ["electron/kitchenTicket.ts"], outfile: "electron-dist/kitchenTicket.cjs" });
+
 const sharedOptions = {
   bundle: false,
   platform: "node",

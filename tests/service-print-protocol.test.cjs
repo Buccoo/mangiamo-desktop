@@ -132,6 +132,26 @@ test('lost service acknowledgement reconciles the existing durable journal and n
   assert.equal(calls.filter(call => call.name === 'print_complete_job').length, 2);
 }));
 
+test('worker uses its live kitchen layout and defers safely if settings cannot be read', async () => {
+  await withWorker(async ({ worker, loaded, state, tick }) => {
+    state.serviceJobs = [];
+    state.legacyJobs = [{ ...job('information'), payload: { table_number: '8', items: [{ name: 'Riso', quantity: 1 }] } }];
+    worker.fetchLivePrinterRoutes = async () => ({ byId: new Map(), byDepartment: new Map(), kitchenLayout: { font: 'A', align: 'right', table: { label: 'POSTAZIONE' } } });
+    await tick();
+    assert.equal(loaded.writes.length, 1);
+    assert.deepEqual(loaded.writes[0].subarray(0, 5), Buffer.from([27, 64, 27, 77, 0]));
+    assert.ok(loaded.writes[0].includes(Buffer.from('POSTAZIONE: 8')));
+  });
+  await withWorker(async ({ worker, loaded, state, calls, tick }) => {
+    state.serviceJobs = [];
+    state.legacyJobs = [{ ...job('information'), payload: { items: [{ name: 'Riso', quantity: 1 }] } }];
+    worker.fetchLivePrinterRoutes = async () => { throw new Error('temporary settings read failure'); };
+    await tick();
+    assert.equal(loaded.writes.length, 0);
+    assert.equal(calls.find(call => call.name === 'print_complete_job').parameters.p_meta.delivery_state, 'not_sent');
+  });
+});
+
 test('service-claimed job missing its protocol and denied renewal both stay not-sent', async () => {
   await withWorker(async ({ calls, loaded, state, tick }) => {
     state.serviceJobs = [{ ...job('information'), payload: { items: [{ name: 'Missing contract', quantity: 1 }] } }];
