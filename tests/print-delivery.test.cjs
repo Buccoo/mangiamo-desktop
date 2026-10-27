@@ -11,7 +11,7 @@ function loadWorkerExports(netOverride) {
   const source = require("node:fs").readFileSync(path.join(__dirname, "../electron-dist/printWorker.cjs"), "utf8");
   const module = { exports: {} };
   const actualRequire = createRequire(path.join(__dirname, "../electron-dist/printWorker.cjs"));
-  vm.runInNewContext(source + "\nmodule.exports.renderTicketForTest = renderTicket; module.exports.resolveRouteForTest = DesktopPrintWorker.prototype.resolveRouteForJob; module.exports.openRawSocketForTest = openRawSocket; module.exports.sendToPrinterForTest = DesktopPrintWorker.prototype.sendToPrinter; module.exports.fetchLiveRoutesForTest = DesktopPrintWorker.prototype.fetchLivePrinterRoutes;", {
+  vm.runInNewContext(source + "\nmodule.exports.escPosForTest = buildEscPosPayload; module.exports.renderTicketForTest = renderTicket; module.exports.resolveRouteForTest = DesktopPrintWorker.prototype.resolveRouteForJob; module.exports.openRawSocketForTest = openRawSocket; module.exports.sendToPrinterForTest = DesktopPrintWorker.prototype.sendToPrinter; module.exports.fetchLiveRoutesForTest = DesktopPrintWorker.prototype.fetchLivePrinterRoutes;", {
     module, exports: module.exports, require: (name) => name === "node:net" && netOverride ? netOverride : actualRequire(name), Buffer, process, __dirname: path.join(__dirname, "../electron-dist"),
   });
   return module.exports;
@@ -318,3 +318,19 @@ test("reviewed receipt generation cannot reuse an older sent journal entry", asy
   assert.equal(sends, 1);
   assert.equal((await journal.list())[0].generation, 0);
 }));
+
+
+test("kitchen product rows use readable Font A, normal weight/size and explicit spacing", () => {
+  const payload = loadWorkerExports().escPosForTest('TAVOLO: 7\n3x Salmone Nigiri\n Nota: senza cetriolo\n2x California Roll');
+  assert.ok(payload.includes(Buffer.from([0x1b,0x4d,0])));
+  assert.ok(payload.includes(Buffer.from([0x1b,0x33,36])));
+  // The table is prominent, but the product section is reset to regular text.
+  const start=payload.indexOf(Buffer.from('3x Salmone'));
+  assert.ok(start>0);
+  const prefix=payload.subarray(0,start);
+  assert.ok(prefix.lastIndexOf(Buffer.from([0x1b,0x45,0]))>prefix.lastIndexOf(Buffer.from([0x1b,0x45,1])));
+  assert.ok(prefix.lastIndexOf(Buffer.from([0x1d,0x21,0]))>prefix.lastIndexOf(Buffer.from([0x1d,0x21,0x11])));
+  assert.ok(!payload.subarray(start).includes(Buffer.from([0x1d,0x21,0x11])));
+  assert.ok(payload.includes(Buffer.from('Nota: senza cetriolo')));
+  assert.ok(payload.subarray(-6).equals(Buffer.from([0x1b,0x64,5,0x1d,0x56,0])));
+});

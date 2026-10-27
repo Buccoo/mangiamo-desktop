@@ -592,7 +592,7 @@ function isBoldLine(line: string) {
   if (!trimmed) return false;
   if (/^tavolo:/i.test(trimmed)) return true;
   if (/^pin:/i.test(trimmed)) return true;
-  if (/^\d+x\s+/i.test(trimmed)) return true;
+  // Product names use normal weight; table/PIN remain prominent.
   return false;
 }
 
@@ -605,10 +605,6 @@ function getLinePrintSize(line: string) {
   }
   if (/^pin:/i.test(trimmed)) {
     // Double width + double height for PIN slip.
-    return 0x11;
-  }
-  if (/^\d+x\s+/i.test(trimmed)) {
-    // Product rows as large as table rows.
     return 0x11;
   }
   // Keep date and other lines in normal size.
@@ -625,10 +621,12 @@ function buildEscPosPayload(ticketText: string, options?: { align?: "left" | "ce
   const alignCenter = options?.pinSlip || options?.align === "center";
   const chunks = [
     Buffer.from([ESC, 0x40]),
-    // Font A makes the PIN readable; ordinary tickets retain Font B.
-    Buffer.from([ESC, 0x4d, options?.pinSlip ? 0x00 : 0x01]),
-    // Slight character spacing improves readability on thermal heads.
-    Buffer.from([ESC, 0x20, 0x02]),
+    // Use the simple, readable Font A for ordinary tickets and PIN slips.
+    Buffer.from([ESC, 0x4d, 0x00]),
+    // Keep 42 Font-A columns within an 80 mm head; no added character spacing.
+    Buffer.from([ESC, 0x20, options?.pinSlip ? 0x02 : 0x00]),
+    // 36 dots leaves breathing room around a normal 24-dot text row.
+    ...(options?.pinSlip ? [] : [Buffer.from([ESC, 0x33, 36])]),
     // Align whole ticket block according to printer paper width.
     Buffer.from([ESC, 0x61, alignCenter ? 0x01 : 0x00]),
   ];
@@ -651,6 +649,7 @@ function buildEscPosPayload(ticketText: string, options?: { align?: "left" | "ce
   if (size !== 0x00) chunks.push(Buffer.from([GS, 0x21, 0x00]));
   if (alignCenter) chunks.push(Buffer.from([ESC, 0x61, 0x00]));
   if (options?.pinSlip) chunks.push(Buffer.from([ESC, 0x4d, 0x01]));
+  else chunks.push(Buffer.from([ESC, 0x32])); // restore default line spacing
   chunks.push(Buffer.from([ESC, 0x64, EXTRA_FEED_LINES]));
   chunks.push(Buffer.from([GS, 0x56, 0x00]));
   return Buffer.concat(chunks);
