@@ -6,7 +6,7 @@ Ordinary jobs load current restaurant formatting. Explicit layout-test jobs carr
 
 The portable kitchen source matches web and staff app. Non-fiscal rendering matches web. Printer width is characters per line, not millimetres; selected width must fit the printer's printable area. Font A/B dot geometry and ESC/POS commands require physical validation on the restaurant hardware, including character encoding, margins and cutter.
 
-Validation: 50 desktop tests passed; one pre-existing external fiscal-evidence fixture was skipped. Typecheck passed. Windows installer produced through the mandatory production-dependency closure, real packaged startup and installer/manifest hash gates. Compiled kitchen, non-fiscal and worker modules extracted from app.asar match the tested modules. No real restaurant jobs or physical print requests were created during QA.
+Validation: 51 desktop tests passed; one pre-existing external fiscal-evidence fixture was skipped. Typecheck passed. Windows installer produced through the mandatory production-dependency closure, real packaged startup and installer/manifest hash gates. Compiled kitchen, non-fiscal and worker modules extracted from app.asar match the tested modules. No real restaurant jobs or physical print requests were created during QA.
 
 Windows-only release. The macOS compatibility manifest keeps its existing immutable asset URLs; this release does not provide a new macOS binary.
 
