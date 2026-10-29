@@ -1,6 +1,6 @@
 {
   "name": "sushiamo-desktop",
-  "version": "1.5.46",
+  "version": "1.5.47",
   "private": true,
   "type": "module",
   "main": "electron-dist/main.cjs",
@@ -10,7 +10,7 @@
     "prepare-config": "node scripts/desktop/generate-runtime-config.mjs",
     "build:ts": "node scripts/desktop/build-electron.mjs",
     "watch:ts": "node scripts/desktop/build-electron.mjs --watch",
-    "build:win": "npm run prepare-config && npm run build:ts && electron-builder --win nsis --publish never",
+    "build:win": "npm run prepare-config && npm run build:ts && electron-builder --win nsis --publish never && node scripts/desktop/smoke-packaged-app.cjs",
     "build:mac": "npm run prepare-config && npm run build:ts && electron-builder --mac dmg --x64 --arm64 --publish never",
     "build:mac:arm64": "npm run prepare-config && npm run build:ts && electron-builder --mac dmg --arm64 --publish never",
     "build:mac:x64": "npm run prepare-config && npm run build:ts && electron-builder --mac dmg --x64 --publish never",
@@ -21,6 +21,7 @@
     "appId": "online.tattica.sushiamo.desktop",
     "productName": "Mangiamo Desktop",
     "asar": true,
+    "afterPack": "./scripts/desktop/verify-packaged-dependencies.cjs",
     "compression": "maximum",
     "publish": [
       {

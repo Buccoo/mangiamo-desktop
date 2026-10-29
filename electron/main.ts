@@ -3,6 +3,7 @@ import { autoUpdater } from "electron-updater";
 import fs from "node:fs";
 import https from "node:https";
 import path from "node:path";
+import os from "node:os";
 import { spawn } from "node:child_process";
 import type { DesktopPrintWorker as DesktopPrintWorkerType } from "./printWorker";
 const { DesktopPrintWorker, scanWifiNetworks } = require("./printWorker.cjs") as {
@@ -1219,6 +1220,16 @@ async function createMainWindow() {
   });
 }
 
+// Isolated packaged-startup verification: no credentials, bridge or renderer are opened.
+const startupSmokeArgument = process.argv.find(value => value.startsWith("--desktop-startup-smoke-dir="));
+const startupSmokeDirectory = startupSmokeArgument ? path.resolve(startupSmokeArgument.slice("--desktop-startup-smoke-dir=".length)) : null;
+if (startupSmokeDirectory) {
+  if (!startupSmokeDirectory.startsWith(path.resolve(os.tmpdir()) + path.sep)) throw new Error("Smoke directory must be inside the temporary directory");
+  fs.mkdirSync(startupSmokeDirectory, { recursive: true });
+  app.setPath("userData", startupSmokeDirectory);
+  app.disableHardwareAcceleration();
+}
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
@@ -1241,6 +1252,12 @@ app.on("open-url", (event, url) => {
 app
   .whenReady()
   .then(async () => {
+    if (startupSmokeDirectory) {
+      fs.writeFileSync(path.join(startupSmokeDirectory, "startup-proof.json"), JSON.stringify({ version: app.getVersion(), isPackaged: app.isPackaged, dependenciesLoaded: true, userDataPath: app.getPath("userData"), bridgeStarted: false, rendererStarted: false }));
+      app.quit();
+      return;
+    }
+
     app.setPath("crashDumps", path.join(app.getPath("userData"), "crash-dumps"));
     log("INFO", "desktop app starting", {
       isPackaged: app.isPackaged,

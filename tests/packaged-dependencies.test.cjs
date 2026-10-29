@@ -1,0 +1,5 @@
+const {test}=require('node:test');const assert=require('node:assert/strict');const {scanRuntimeDependencies}=require('../scripts/desktop/verify-packaged-dependencies.cjs');
+const scan=packages=>scanRuntimeDependencies(Object.keys(packages),name=>packages[name]);
+test('detects the graceful-fs packaging regression through fs-extra',()=>{const result=scan({'package.json':{name:'app',dependencies:{'fs-extra':'10'}},'node_modules/fs-extra/package.json':{name:'fs-extra',dependencies:{'graceful-fs':'4'}}});assert.deepEqual(result,['fs-extra -> graceful-fs']);});
+test('resolves hoisted and nested scoped production dependencies',()=>{assert.deepEqual(scan({'package.json':{dependencies:{'@vendor/sdk':'1'}},'node_modules/@vendor/sdk/package.json':{dependencies:{utility:'1'}},'node_modules/@vendor/sdk/node_modules/utility/package.json':{dependencies:{shared:'1'}},'node_modules/shared/package.json':{}}),[]);});
+test('does not require development or optional platform dependencies at runtime',()=>{assert.deepEqual(scan({'package.json':{devDependencies:{missing:'1'},dependencies:{optional:'1'},optionalDependencies:{optional:'1'}}}),[]);});
