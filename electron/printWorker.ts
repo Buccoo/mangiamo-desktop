@@ -809,6 +809,8 @@ async function runWithConcurrency<T>(items: T[], concurrency: number, worker: (i
 }
 
 export class DesktopPrintWorker {
+  private serviceStartPromise: Promise<WorkerPublicState> | null = null;
+  private serviceStartGeneration = 0;
   private readonly runtimeConfig: RuntimeConfig;
   private readonly appVersion: string;
   private readonly onMainLog?: (level: "INFO" | "WARN" | "ERROR", message: string) => void;
@@ -934,12 +936,28 @@ export class DesktopPrintWorker {
     return this.getPublicState();
   }
 
-  async startService() {
+  async startService(): Promise<WorkerPublicState> {
+    if (this.serviceStartPromise) return this.serviceStartPromise;
+    const generation = ++this.serviceStartGeneration;
+    const pending = this.startServiceAfterReview(generation);
+    this.serviceStartPromise = pending;
+    try { return await pending; } finally { if (this.serviceStartPromise === pending) this.serviceStartPromise = null; }
+  }
+
+  private async startServiceAfterReview(generation: number) {
     if (this.service.running) return this.getPublicState();
     await this.ensureSignedIn();
     if (!this.authState.restaurant?.id) {
       throw new Error("Nessun ristorante associato all'account.");
     }
+    const restaurantId = this.authState.restaurant.id;
+    const { data: review, error: reviewError } = await this.ensureSupabaseClient().rpc("print_hold_startup_jobs", {
+      p_restaurant_id: restaurantId, p_consumer_id: this.config.consumerId,
+    });
+    if (reviewError) throw new Error(`Verifica stampe arretrate non disponibile: ${normalizeError(reviewError)}`);
+    if (review?.ok !== true || !Number.isSafeInteger(review.held_count) || review.held_count < 0) throw new Error("Verifica stampe arretrate non confermata. Nessuna stampa avviata.");
+    if (generation !== this.serviceStartGeneration || this.authState.restaurant?.id !== restaurantId) return this.getPublicState();
+    if (review.held_count > 0) this.pushLog("WARN", `${review.held_count} stampe arretrate sospese: controlla la coda in Stampanti.`);
     this.service.running = true;
     this.service.assignedPrinterId = null;
     this.service.stats = {
@@ -959,6 +977,7 @@ export class DesktopPrintWorker {
   }
 
   async stopService() {
+    this.serviceStartGeneration += 1;
     this.service.running = false;
     if (this.service.timer) {
       clearTimeout(this.service.timer);
