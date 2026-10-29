@@ -30,6 +30,9 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           npm version "$VERSION" --no-git-tag-version --ignore-scripts --allow-same-version
 
+      - name: Test and typecheck desktop
+        run: npm test && npm run typecheck
+
       - name: Build Electron
         run: npm run prepare-config && npm run build:ts
         env:
@@ -45,6 +48,9 @@ jobs:
       - name: Package Windows
         run: npx electron-builder --win nsis --publish never
 
+      - name: Verify packaged Windows startup and release artifacts
+        run: node scripts/desktop/smoke-packaged-app.cjs && node scripts/desktop/verify-release-artifacts.cjs dist-desktop
+
       - name: Prepare legacy download aliases
         run: |
           Copy-Item -LiteralPath dist-desktop/Mangiamo-Desktop-Setup.exe -Destination dist-desktop/SushiAMO-Desktop-Setup.exe
@@ -54,6 +60,7 @@ jobs:
         with:
           name: windows-build
           path: |
+            dist-desktop/packaged-startup-proof.json
             dist-desktop/*.exe
             dist-desktop/*.yml
             dist-desktop/*.blockmap
@@ -76,6 +83,9 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           npm version "$VERSION" --no-git-tag-version --ignore-scripts --allow-same-version
+
+      - name: Test and typecheck desktop
+        run: npm test && npm run typecheck
 
       - name: Build Electron
         run: npm run prepare-config && npm run build:ts
@@ -132,10 +142,17 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
           path: artifacts
+
+      - name: Require matching packaged startup proof before publication
+        run: node scripts/desktop/verify-release-artifacts.cjs artifacts "${{ github.ref_name }}"
 
       - name: List artifacts
         run: ls -la artifacts/
@@ -177,6 +194,7 @@ jobs:
           git checkout main
           git fetch origin --prune --tags
           git pull --ff-only
+          node ../mangiamo-desktop/scripts/desktop/verify-release-artifacts.cjs ../mangiamo-desktop/dist-desktop "${GITHUB_REF_NAME}"
           node scripts/print/publish-desktop-build.mjs --platform win
           node scripts/print/publish-desktop-updater.mjs
           git config user.email "github-actions[bot]@users.noreply.github.com"
