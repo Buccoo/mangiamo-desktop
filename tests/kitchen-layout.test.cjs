@@ -78,3 +78,16 @@ test('non-fiscal receipt uses the saved layout without changing fiscal transport
   assert.doesNotMatch(bytes.toString(), /Fixture|Coperto/);
   assert.match(bytes.toString(), /NON FISCALE/);
 });
+
+test('font changes retain the paper center and wrapping never exceeds the chosen head', () => {
+  for(const dots of [384,512,576,960]) for(const font of ['A','B']) {
+    const layout=core.normalizeKitchenLayout({printable_dots:dots,font,width:80,items:{size:'double'}});
+    assert.equal(layout.printable_dots,dots);
+    assert.ok(layout.width * (font==='A'?12:9) <= dots);
+    const result=core.renderKitchenTicketCore(sample,{layout});
+    const bytes=Buffer.from(core.buildKitchenEscPos(result.lines,layout));
+    assert.ok(bytes.includes(Buffer.from([29,87,dots & 255,dots >> 8])));
+    assert.ok(result.lines.every(line=>line.align==='center'));
+    assert.ok(result.lines.every(line=>core.ticketTextColumns(line.text)*(line.size==='double'?2:1)*(font==='A'?12:9)<=dots));
+  }
+});

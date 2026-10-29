@@ -47,6 +47,7 @@ export interface KitchenLayoutConfig {
   separator_char: "-" | "=" | "*";
   width: 32 | 42 | 48 | 80;
   font: EscPosFont;
+  printable_dots: 384 | 512 | 576 | 960;
 }
 
 export const DEFAULT_KITCHEN_LAYOUT: KitchenLayoutConfig = {
@@ -82,6 +83,7 @@ export const DEFAULT_KITCHEN_LAYOUT: KitchenLayoutConfig = {
   separator_char: "-",
   width: 42,
   font: "A",
+  printable_dots: 576,
 };
 
 export function normalizeKitchenLayout(raw: unknown): KitchenLayoutConfig {
@@ -91,6 +93,10 @@ export function normalizeKitchenLayout(raw: unknown): KitchenLayoutConfig {
   const tb = r.table && typeof r.table === "object" ? (r.table as Record<string, unknown>) : {};
   const it = r.items && typeof r.items === "object" ? (r.items as Record<string, unknown>) : {};
   const ft = r.footer && typeof r.footer === "object" ? (r.footer as Record<string, unknown>) : {};
+  const font = r.font === 'B' ? 'B' : 'A';
+  const requestedWidth = ([32, 42, 48, 80] as number[]).includes(Number(r.width)) ? Number(r.width) : d.width;
+  const printableDots = ([384, 512, 576, 960] as number[]).includes(Number(r.printable_dots)) ? Number(r.printable_dots) : requestedWidth === 80 ? 960 : 576;
+  const width = Math.max(...[32, 42, 48, 80].filter(value => value <= requestedWidth && value * (font === 'A' ? 12 : 9) <= printableDots)) as KitchenLayoutConfig['width'];
 
   return {
     align: r.align === "left" || r.align === "right" ? r.align : "center",
@@ -123,8 +129,9 @@ export function normalizeKitchenLayout(raw: unknown): KitchenLayoutConfig {
       custom_text: typeof ft.custom_text === "string" ? ft.custom_text : "",
     },
     separator_char: ["-", "=", "*"].includes(String(r.separator_char)) ? (String(r.separator_char) as "-" | "=" | "*") : d.separator_char,
-    width: ([32, 42, 48, 80] as number[]).includes(Number(r.width)) ? (Number(r.width) as 32 | 42 | 48 | 80) : d.width,
-    font: r.font === "B" ? "B" : "A",
+    width,
+    font,
+    printable_dots: printableDots as KitchenLayoutConfig['printable_dots'],
   };
 }
 
@@ -394,7 +401,7 @@ export function buildKitchenEscPos(lines: AnnotatedLine[], rawLayout?: unknown):
   const layout = normalizeKitchenLayout(rawLayout);
   // Use the same fixed cell geometry as the preview. The printer must support
   // this printable width; 80 columns is intended for wide-format hardware.
-  const dots = layout.width * (layout.font === 'A' ? 12 : 9);
+  const dots = layout.printable_dots;
   const bytes: number[] = [27, 64, 27, 77, layout.font === 'A' ? 0 : 1, 27, 32, 0,
     29, 76, 0, 0, 29, 87, dots & 255, dots >> 8];
   const encoder = new TextEncoder();
