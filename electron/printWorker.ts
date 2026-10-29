@@ -9,6 +9,12 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type * as PrintDelivery from "./printDelivery";
 const { LocalPrintJournal, PrintNotSentError, deliverPrintJob } = require("./printDelivery.cjs") as typeof PrintDelivery;
 
+import type * as KitchenTicket from "./kitchenTicket";
+const { renderKitchenTicketCore, buildKitchenEscPos } = require("./kitchenTicket.cjs") as typeof KitchenTicket;
+
+import type * as ReceiptTicket from "./receiptTicket";
+const { renderNonFiscalReceiptTicket: renderReceiptCore } = require("./receiptTicket.cjs") as typeof ReceiptTicket;
+
 type RuntimeConfig = {
   VITE_SUPABASE_URL: string;
   VITE_SUPABASE_ANON_KEY: string;
@@ -81,6 +87,8 @@ type LiveRoutes = {
   byDepartment: Map<string, LivePrinter>;
   defaultPrinterId: string | null;
   pinPrinterId: string | null;
+  kitchenLayout?: unknown;
+  receiptLayout?: unknown;
 };
 
 type DiscoverPrinter = {
@@ -406,43 +414,14 @@ function renderPinSlip(job: JobRow) {
   return `TAV. ${compactTableLabel(payload.table_number)}\nPIN: ${pinRaw}`;
 }
 
-function renderTicket(job: JobRow) {
-  if (isPinSlipJob(job)) return renderPinSlip(job);
-  const department = normalizeDepartment(
-    (job.payload as Record<string, unknown>)?.department || job.department,
-  );
-
-  const width = 42;
+function renderAnnotatedKitchenTicket(job: JobRow, liveLayout?: unknown) {
   const payload = (job.payload || {}) as Record<string, unknown>;
-  const items = Array.isArray(payload.items) ? payload.items : [];
-  const restaurantName = String(payload.restaurant_name || "").trim() || "Ristorante";
-  const tableLabel = String(payload.table_number || "").trim() || "-";
-  const orderLabel = payload.order_number != null ? `#${String(payload.order_number)}` : "#-";
-  const createdAt = formatTimestamp(payload.created_at || job.created_at);
-  const lines: string[] = [];
-  lines.push(`COMANDA ${department.toUpperCase()} ${orderLabel}`);
-  lines.push(`TAVOLO: ${tableLabel.toUpperCase()}`);
-  if (createdAt) lines.push(`DATA: ${createdAt}`);
-  lines.push("-".repeat(width));
-  for (const rawItem of items) {
-    const item = (rawItem || {}) as Record<string, unknown>;
-    const qty = Math.max(1, Number(item.quantity) || 1);
-    const label = `${qty}x ${prettifyDishName(item.name)}`;
-    for (const chunk of wrapText(label, width)) lines.push(chunk);
-    for (const rawModifier of Array.isArray(item.modifiers) ? item.modifiers : []) {
-      const modifier = (rawModifier || {}) as Record<string, unknown>;
-      const name = String(modifier.name || "").trim();
-      if (!name) continue;
-      const modifierQty = Math.max(1, Math.trunc(Number(modifier.qty) || 1));
-      const modifierType = String(modifier.modifier_type || "variant").trim().toLowerCase();
-      const prefix = ["remove", "removal"].includes(modifierType) ? "SENZA " : ["extra", "addon"].includes(modifierType) ? "+ " : "Variante: ";
-      for (const chunk of wrapText(`${prefix}${name}${modifierQty > 1 ? ` x${modifierQty}` : ""}`, width - 2)) lines.push(` ${chunk}`);
-    }
-    const notes = String(item.notes || "").trim();
-    if (notes) for (const chunk of wrapText(`Nota: ${notes}`, width - 2)) lines.push(` ${chunk}`);
-  }
-  lines.push(`-- ${restaurantName} --`);
-  return lines.join("\n");
+  const snapshot = payload.layout && typeof payload.layout === 'object' ? payload.layout as Record<string, unknown> : {};
+  const layout = payload.layout_test === true ? snapshot.kitchen : liveLayout ?? snapshot.kitchen;
+  return renderKitchenTicketCore({ ...payload, department: String(payload.department || job.department || 'cucina'), created_at: String(payload.created_at || job.created_at || '') } as KitchenTicket.KitchenTicketPayload, { layout });
+}
+function renderTicket(job: JobRow, layout?: unknown) {
+  return isPinSlipJob(job) ? renderPinSlip(job) : renderAnnotatedKitchenTicket(job, layout).text;
 }
 
 function formatCurrency(value: unknown) {
@@ -1283,6 +1262,8 @@ export class DesktopPrintWorker {
     return {
       byId,
       byDepartment,
+      kitchenLayout: (printing.ticket_layout as Record<string, unknown> | undefined)?.kitchen,
+      receiptLayout: (printing.ticket_layout as Record<string, unknown> | undefined)?.receipt,
       defaultPrinterId: String(printing.default_printer_id || "").trim() || null,
       pinPrinterId: String(pinPrinting.printer_id || "").trim() || null,
     };
@@ -1326,11 +1307,14 @@ export class DesktopPrintWorker {
     return null;
   }
 
-  private async sendToPrinter(job: JobRow, routeOverride: { host: string; port: number } | null) {
+  private async sendToPrinter(job: JobRow, routeOverride: { host: string; port: number } | null, kitchenLayout?: unknown) {
     const host = String(routeOverride?.host || "").trim();
     const port = sanitizePrinterPort(routeOverride?.port);
     if (!host) throw new PrintNotSentError("NO_PRINTER_HOST");
-    const payload = buildEscPosPayload(renderTicket(job), { pinSlip: isPinSlipJob(job) });
+    const snapshot = (job.payload?.layout ?? {}) as Record<string, unknown>;
+    const chosenLayout = job.payload?.layout_test === true ? snapshot.kitchen : kitchenLayout ?? snapshot.kitchen;
+    const payload = isPinSlipJob(job) ? buildEscPosPayload(renderPinSlip(job), { pinSlip: true })
+      : Buffer.from(buildKitchenEscPos(renderAnnotatedKitchenTicket(job, chosenLayout).lines, chosenLayout));
     let lastError: unknown = null;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
@@ -1414,14 +1398,17 @@ export class DesktopPrintWorker {
     this.pushLog(outcome === "sent" ? "INFO" : "ERROR", `Ricevuta ${queue} ${String(job.id).slice(0, 8)}: ${outcome}; verificare uscita carta`);
   }
 
-  private async sendToNonFiscalReceiptPrinter(job: NonFiscalReceiptJobRow) {
+  private async sendToNonFiscalReceiptPrinter(job: NonFiscalReceiptJobRow, liveLayout?: unknown) {
     const payload = (job.payload && typeof job.payload === "object" ? job.payload : {}) as Record<string, unknown>;
     const route = (payload.route && typeof payload.route === "object" ? payload.route : {}) as Record<string, unknown>;
     const host = String(route.host ?? "").trim();
     const port = sanitizePrinterPort(route.port ?? 9100);
     if (!host) throw new PrintNotSentError("NO_PRINTER_HOST");
-    const ticketText = renderNonFiscalReceiptTicket(job);
-    const escPosPayload = buildEscPosPayload(ticketText, { align: "center" });
+    const snapshot = (payload.layout ?? {}) as Record<string, unknown>;
+    const layout = payload.layout_test === true ? snapshot.receipt : liveLayout;
+    const normalized = (require("./receiptTicket.cjs") as typeof ReceiptTicket).normalizeReceiptLayout(layout);
+    const result = renderReceiptCore({ ...payload, paid_at: String(payload.paid_at || job.created_at || '') } as ReceiptTicket.NonFiscalReceiptPayload, { layout });
+    const escPosPayload = Buffer.from(buildKitchenEscPos(result.lines, normalized));
     let lastError: unknown = null;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
@@ -1505,7 +1492,8 @@ export class DesktopPrintWorker {
           }, async () => {
             const { error: renewError } = await client.rpc("print_renew_claim", { p_job_id: job.id, p_consumer_id: this.config.consumerId });
             if (renewError) throw new PrintNotSentError(normalizeError(renewError));
-            await this.sendToPrinter(job, route);
+            if (!isPinSlipJob(job) && !liveRoutes) throw new PrintNotSentError("KITCHEN_LAYOUT_UNAVAILABLE");
+            await this.sendToPrinter(job, route, liveRoutes?.kitchenLayout);
           }, (success, errorMessage, meta) => this.completePrintJob(job, success, errorMessage, meta));
           if (outcome === "sent") {
             this.service.stats.printed += 1;
@@ -1584,7 +1572,7 @@ export class DesktopPrintWorker {
 
             for (const job of nfrJobs) {
               try {
-                await this.deliverReceipt("non_fiscal", job, () => this.sendToNonFiscalReceiptPrinter(job));
+                await this.deliverReceipt("non_fiscal", job, () => { if (!liveRoutes) throw new PrintNotSentError("RECEIPT_LAYOUT_UNAVAILABLE"); return this.sendToNonFiscalReceiptPrinter(job, liveRoutes.receiptLayout); });
               } catch (jobError) {
                 const message = normalizeError(jobError);
                 this.service.stats.failed += 1;

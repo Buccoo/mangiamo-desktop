@@ -127,13 +127,13 @@ test("the desktop sends the complete PIN and cut sequence to its explicit TCP de
 test("ordinary kitchen transport keeps its existing five-line feed and cut", async () => {
   const printed = await actualPrintBytes({ department: "sushi", payload: { items: [{ name: "Nigiri", quantity: 1 }] } });
   assert.deepEqual(printed.subarray(-6), Buffer.from([0x1b, 0x64, 5, 0x1d, 0x56, 0]));
-  assert.match(printed.toString(), /COMANDA SUSHI/);
+  assert.match(printed.toString(), /COMANDA sushi/);
 });
 
 test("a kitchen department named pin remains a food ticket on its kitchen printer", async () => {
   const job = { department: "pin", order_id: "food-order", payload: { department: "pin", items: [{ name: "Nigiri", quantity: 1 }] } };
   const printed = await actualPrintBytes(job);
-  assert.match(printed.toString(), /COMANDA PIN/);
+  assert.match(printed.toString(), /COMANDA pin/);
   assert.match(printed.toString(), /1x Nigiri/);
   assert.deepEqual(printed.subarray(-6), Buffer.from([0x1b, 0x64, 5, 0x1d, 0x56, 0]));
   const kitchen = { id: "kitchen", host: "kitchen", port: 9100, enabled: true };
