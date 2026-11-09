@@ -209,7 +209,8 @@ function sanitizeDeviceName(value: unknown) {
 function sanitizePollMs(value: unknown) {
   const n = Number(value);
   if (!Number.isFinite(n)) return 1000;
-  return Math.max(500, Math.min(10000, Math.trunc(n)));
+  // Older installations persisted a 2500ms pause on top of every network cycle.
+  return Math.max(500, Math.min(1000, Math.trunc(n)));
 }
 
 function sanitizeClaimLimit(value: unknown) {
@@ -789,6 +790,8 @@ async function runWithConcurrency<T>(items: T[], concurrency: number, worker: (i
 export class DesktopPrintWorker {
   private serviceStartPromise: Promise<WorkerPublicState> | null = null;
   private serviceStartGeneration = 0;
+  private lastAgentHeartbeatAt = 0;
+  private nextReceiptQueue = 0;
   private readonly runtimeConfig: RuntimeConfig;
   private readonly appVersion: string;
   private readonly onMainLog?: (level: "INFO" | "WARN" | "ERROR", message: string) => void;
@@ -937,6 +940,8 @@ export class DesktopPrintWorker {
     if (generation !== this.serviceStartGeneration || this.authState.restaurant?.id !== restaurantId) return this.getPublicState();
     if (review.held_count > 0) this.pushLog("WARN", `${review.held_count} stampe arretrate sospese: controlla la coda in Stampanti.`);
     this.service.running = true;
+    this.lastAgentHeartbeatAt = 0;
+    this.nextReceiptQueue = 0;
     this.service.assignedPrinterId = null;
     this.service.stats = {
       claimed: 0,
@@ -1450,12 +1455,30 @@ export class DesktopPrintWorker {
 
   private async runTick() {
     if (!this.service.running || this.service.processing) return;
+    if (this.service.timer) clearTimeout(this.service.timer);
+    this.service.timer = null;
+    const tickStartedAt = Date.now();
+    const generation = this.serviceStartGeneration;
+    const restaurantId = this.authState.restaurant?.id;
+    const consumerId = this.config.consumerId;
+    const assertCurrentRun = () => {
+      if (!this.service.running || generation !== this.serviceStartGeneration || restaurantId !== this.authState.restaurant?.id || consumerId !== this.config.consumerId) {
+        throw new PrintNotSentError("PRINT_SERVICE_CHANGED");
+      }
+    };
+    let didWork = false;
+    let tickFailed = false;
     this.service.processing = true;
     this.broadcastState();
     try {
       await this.ensureSignedIn();
       if (!this.authState.restaurant?.id) throw new Error("Ristorante non risolto.");
-      await this.heartbeatAgent(true);
+      assertCurrentRun();
+      // Presence is metadata; lease/permission checks still run for every job.
+      if (!this.lastAgentHeartbeatAt || Date.now() - this.lastAgentHeartbeatAt >= 15000) {
+        await this.heartbeatAgent(true);
+        this.lastAgentHeartbeatAt = Date.now();
+      }
       const client = this.ensureSupabaseClient();
       // Reconcile only cloud acknowledgements. Persisted sends are never sent again.
       for (const pending of await this.deliveryJournal.list()) {
@@ -1466,6 +1489,7 @@ export class DesktopPrintWorker {
           ? this.completeReceiptDelivery(pending.queue, pending.jobId, success, errorMessage, meta, pending.consumerId)
           : this.completePrintJob({ id: pending.jobId }, success, errorMessage, meta, pending.consumerId));
       }
+      assertCurrentRun();
       const { data, error } = await client.rpc("print_claim_jobs", {
         p_restaurant_id: this.authState.restaurant.id,
         p_consumer_id: this.config.consumerId,
@@ -1473,11 +1497,12 @@ export class DesktopPrintWorker {
       });
       if (error) throw error;
       const jobs = (Array.isArray(data) ? data : []) as JobRow[];
+      didWork = jobs.length > 0;
       this.service.stats.claimed += jobs.length;
       if (jobs.length > 0) this.pushLog("INFO", `Claimati ${jobs.length} job`);
 
       let liveRoutes: LiveRoutes | null = null;
-      try {
+      if (jobs.length > 0) try {
         liveRoutes = await this.fetchLivePrinterRoutes(this.authState.restaurant.id);
       } catch (routesError) {
         this.pushLog("WARN", `Risoluzione route live fallita: ${normalizeError(routesError)}`);
@@ -1491,6 +1516,7 @@ export class DesktopPrintWorker {
           }, async () => {
             const { error: renewError } = await client.rpc("print_renew_claim", { p_job_id: job.id, p_consumer_id: this.config.consumerId });
             if (renewError) throw new PrintNotSentError(normalizeError(renewError));
+            assertCurrentRun();
             if (!isPinSlipJob(job) && !liveRoutes) throw new PrintNotSentError("KITCHEN_LAYOUT_UNAVAILABLE");
             await this.sendToPrinter(job, route, liveRoutes?.kitchenLayout);
           }, (success, errorMessage, meta) => this.completePrintJob(job, success, errorMessage, meta));
@@ -1509,7 +1535,16 @@ export class DesktopPrintWorker {
         }
       }
 
-      if (this.physicalReceiptRpcAvailable) {
+      assertCurrentRun();
+      // Check one receipt queue per cycle, rotating fairly. Never preclaim batches
+      // or overlap physical operations while another lease is being delivered.
+      const receiptQueues = [
+        this.physicalReceiptRpcAvailable ? "physical" : null,
+        this.nonFiscalReceiptRpcAvailable ? "non_fiscal" : null,
+        this.fiscalReceiptRpcAvailable ? "fiscal" : null,
+      ].filter(Boolean);
+      const receiptQueue = receiptQueues.length ? receiptQueues[this.nextReceiptQueue++ % receiptQueues.length] : null;
+      if (receiptQueue === "physical") {
         try {
           const { data: physicalData, error: physicalError } = await client.rpc("physical_receipt_claim_jobs", {
             p_restaurant_id: this.authState.restaurant.id,
@@ -1526,6 +1561,7 @@ export class DesktopPrintWorker {
             }
           } else {
             const physicalJobs = (Array.isArray(physicalData) ? physicalData : []) as PhysicalReceiptJobRow[];
+            didWork ||= physicalJobs.length > 0;
             this.service.stats.claimed += physicalJobs.length;
             if (physicalJobs.length > 0) {
               this.pushLog("INFO", `Claimati ${physicalJobs.length} job RT fisico`);
@@ -1533,7 +1569,7 @@ export class DesktopPrintWorker {
 
             for (const job of physicalJobs) {
               try {
-                await this.deliverReceipt("physical", job, () => this.sendToPhysicalReceiptDevice(job));
+                await this.deliverReceipt("physical", job, () => { assertCurrentRun(); return this.sendToPhysicalReceiptDevice(job); });
               } catch (jobError) {
                 const message = normalizeError(jobError);
                 this.service.stats.failed += 1;
@@ -1543,11 +1579,12 @@ export class DesktopPrintWorker {
             }
           }
         } catch (physicalTickError) {
+          tickFailed = true;
           this.pushLog("ERROR", `Tick RT fisico: ${normalizeError(physicalTickError)}`);
         }
       }
 
-      if (this.nonFiscalReceiptRpcAvailable) {
+      if (receiptQueue === "non_fiscal") {
         try {
           const { data: nfrData, error: nfrError } = await client.rpc("non_fiscal_receipt_claim_jobs", {
             p_restaurant_id: this.authState.restaurant.id,
@@ -1564,14 +1601,22 @@ export class DesktopPrintWorker {
             }
           } else {
             const nfrJobs = (Array.isArray(nfrData) ? nfrData : []) as NonFiscalReceiptJobRow[];
+            didWork ||= nfrJobs.length > 0;
             this.service.stats.claimed += nfrJobs.length;
             if (nfrJobs.length > 0) {
               this.pushLog("INFO", `Claimati ${nfrJobs.length} job scontrino non fiscale`);
+              try {
+                // Fetch only when paper is needed; do not cache edited layouts.
+                liveRoutes = await this.fetchLivePrinterRoutes(this.authState.restaurant.id);
+              } catch (routesError) {
+                liveRoutes = null;
+                this.pushLog("WARN", `Risoluzione route ricevuta fallita: ${normalizeError(routesError)}`);
+              }
             }
 
             for (const job of nfrJobs) {
               try {
-                await this.deliverReceipt("non_fiscal", job, () => { if (!liveRoutes) throw new PrintNotSentError("RECEIPT_LAYOUT_UNAVAILABLE"); return this.sendToNonFiscalReceiptPrinter(job, liveRoutes.receiptLayout); });
+                await this.deliverReceipt("non_fiscal", job, () => { assertCurrentRun(); if (!liveRoutes) throw new PrintNotSentError("RECEIPT_LAYOUT_UNAVAILABLE"); return this.sendToNonFiscalReceiptPrinter(job, liveRoutes.receiptLayout); });
               } catch (jobError) {
                 const message = normalizeError(jobError);
                 this.service.stats.failed += 1;
@@ -1581,11 +1626,12 @@ export class DesktopPrintWorker {
             }
           }
         } catch (nfrTickError) {
+          tickFailed = true;
           this.pushLog("ERROR", `Tick scontrino non fiscale: ${normalizeError(nfrTickError)}`);
         }
       }
 
-      if (this.fiscalReceiptRpcAvailable) {
+      if (receiptQueue === "fiscal") {
         try {
           const { data: fiscalData, error: fiscalError } = await client.rpc("fiscal_receipt_print_claim_jobs", {
             p_restaurant_id: this.authState.restaurant.id,
@@ -1602,6 +1648,7 @@ export class DesktopPrintWorker {
             }
           } else {
             const fiscalJobs = (Array.isArray(fiscalData) ? fiscalData : []) as FiscalReceiptPrintJobRow[];
+            didWork ||= fiscalJobs.length > 0;
             this.service.stats.claimed += fiscalJobs.length;
             if (fiscalJobs.length > 0) {
               this.pushLog("INFO", `Claimati ${fiscalJobs.length} job scontrino fiscale`);
@@ -1609,7 +1656,7 @@ export class DesktopPrintWorker {
 
             for (const job of fiscalJobs) {
               try {
-                await this.deliverReceipt("fiscal", job, () => this.sendToFiscalReceiptPrinter(job));
+                await this.deliverReceipt("fiscal", job, () => { assertCurrentRun(); return this.sendToFiscalReceiptPrinter(job); });
               } catch (jobError) {
                 const message = normalizeError(jobError);
                 this.service.stats.failed += 1;
@@ -1619,6 +1666,7 @@ export class DesktopPrintWorker {
             }
           }
         } catch (fiscalTickError) {
+          tickFailed = true;
           this.pushLog("ERROR", `Tick scontrino fiscale: ${normalizeError(fiscalTickError)}`);
         }
       }
@@ -1626,6 +1674,7 @@ export class DesktopPrintWorker {
       this.service.stats.lastRunAt = new Date().toISOString();
       this.service.stats.lastError = null;
     } catch (error) {
+      tickFailed = true;
       const message = normalizeError(error);
       this.service.stats.lastError = message;
       this.pushLog("ERROR", `Tick error: ${message}`);
@@ -1633,9 +1682,10 @@ export class DesktopPrintWorker {
       this.service.processing = false;
       this.broadcastState();
       if (this.service.running) {
+        const delay = tickFailed ? this.config.pollMs : didWork ? 0 : Math.max(0, this.config.pollMs - (Date.now() - tickStartedAt));
         this.service.timer = setTimeout(() => {
           void this.runTick();
-        }, this.config.pollMs);
+        }, delay);
       }
     }
   }
