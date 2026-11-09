@@ -5,12 +5,23 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Single-platform runs build artifacts only; public releases require all
+        type: choice
+        required: true
+        default: all
+        options:
+          - all
+          - windows
+          - mac
 
 permissions:
   contents: write
 
 jobs:
   build-windows:
+    if: github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'windows'
     runs-on: windows-latest
     steps:
       - name: Checkout mangiamo-desktop
@@ -66,6 +77,7 @@ jobs:
             dist-desktop/*.blockmap
 
   build-mac:
+    if: github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'mac'
     runs-on: macos-latest
     steps:
       - name: Checkout mangiamo-desktop
@@ -140,7 +152,9 @@ jobs:
   release:
     needs: [build-windows, build-mac]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    # Single-platform dispatch uploads artifacts only. Public releases retain
+    # the existing requirement that both Windows and macOS builds succeed.
+    if: startsWith(github.ref, 'refs/tags/') && needs.build-windows.result == 'success' && needs.build-mac.result == 'success'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -165,7 +179,7 @@ jobs:
   update-feed:
     needs: [release]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') && needs.release.result == 'success'
     steps:
       - uses: actions/checkout@v4
         with:

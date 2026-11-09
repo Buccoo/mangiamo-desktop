@@ -91,3 +91,25 @@ test('font changes retain the paper center and wrapping never exceeds the chosen
     assert.ok(result.lines.every(line=>core.ticketTextColumns(line.text)*(line.size==='double'?2:1)*(font==='A'?12:9)<=dots));
   }
 });
+
+test('actual transport emits selected row styles and block order with attached item details', async () => {
+  const layout = { width: 48, font: 'B', printable_dots: 384,
+    block_order: ['items', 'table', 'header', 'timestamp', 'footer'],
+    styles: { items: { font: 'A', size: 'double', bold: true, align: 'right', space_after: 1 }, notes: { font: 'B', size: 'normal', bold: true, align: 'left' } } };
+  const bytes = await print({ payload: sample }, layout);
+  assert.ok(bytes.includes(Buffer.from([27,77,0,27,97,2,27,69,1,29,33,17,27,51,56])));
+  assert.ok(bytes.includes(Buffer.from([27,77,1,27,97,0,27,69,1,29,33,0,27,51,36])));
+  const text = bytes.toString();
+  assert.ok(text.indexOf('Sushi') >= 0 && text.indexOf('Sushi') < text.indexOf('Tavolo: 5'));
+  assert.ok(text.indexOf('Gyoza') >= 0 && text.indexOf('Ospite: Marco') < text.indexOf('Gyoza'));
+  assert.ok(text.indexOf('Nota: senza aglio') < text.indexOf('Tavolo: 5'));
+  assert.deepEqual(bytes.subarray(-20), Buffer.from([27,69,0,29,33,0,27,97,0,27,77,0,27,50,27,100,5,29,86,0]));
+});
+
+test('180dpi 58mm heads use finite 30-column A geometry', () => {
+  const layout = core.normalizeKitchenLayout({ printable_dots: 360, width: 80, font: 'A' });
+  assert.equal(layout.width, 30);
+  assert.equal(layout.printable_dots, 360);
+  for (const line of core.renderKitchenTicketCore(sample, { layout }).lines)
+    assert.ok(core.ticketTextColumns(line.text) * (line.font === 'B' ? 9 : 12) * (line.size === 'double' ? 2 : 1) <= 360);
+});

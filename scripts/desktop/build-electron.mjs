@@ -4,6 +4,8 @@ import { context, build } from "esbuild";
 const watchMode = process.argv.includes("--watch");
 
 const targets = [
+  { entryPoints: ["electron/printerPaper.ts"], outfile: "electron-dist/printerPaper.cjs" },
+  { entryPoints: ["electron/desktopUpdate.ts"], outfile: "electron-dist/desktopUpdate.cjs" },
   { entryPoints: ["electron/receiptTicket.ts"], outfile: "electron-dist/receiptTicket.cjs" },
   { entryPoints: ["electron/kitchenTicket.ts"], outfile: "electron-dist/kitchenTicket.cjs" },
   {

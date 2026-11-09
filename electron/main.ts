@@ -4,8 +4,13 @@ import fs from "node:fs";
 import https from "node:https";
 import path from "node:path";
 import os from "node:os";
-import { spawn } from "node:child_process";
 import type { DesktopPrintWorker as DesktopPrintWorkerType } from "./printWorker";
+import type { detectPrinterPaper as DetectPrinterPaper } from "./printerPaper";
+const { detectPrinterPaper } = require("./printerPaper.cjs") as { detectPrinterPaper: typeof DetectPrinterPaper };
+import type { createDesktopUpdateActions as CreateDesktopUpdateActions } from "./desktopUpdate";
+const { createDesktopUpdateActions } = require("./desktopUpdate.cjs") as {
+  createDesktopUpdateActions: typeof CreateDesktopUpdateActions;
+};
 const { DesktopPrintWorker, scanWifiNetworks } = require("./printWorker.cjs") as {
   DesktopPrintWorker: typeof DesktopPrintWorkerType;
   scanWifiNetworks: () => Promise<import("./printWorker").WifiNetwork[]>;
@@ -79,12 +84,36 @@ let desktopUpdateDownloaded = false;
 let desktopUpdateAvailable = false;
 let desktopUpdateInfo: { version?: string | null; releaseName?: string | null; releaseDate?: string | null } | null = null;
 let desktopUpdateCheckInProgress = false;
+let desktopUpdateCheckPromise: ReturnType<typeof autoUpdater.checkForUpdates> | null = null;
 let desktopUpdateListenersBound = false;
 let desktopUpdateFeedCandidates: string[] = [];
 let desktopUpdateFeedIndex = 0;
 let desktopUpdateIntervalHandle: NodeJS.Timeout | null = null;
 let fallbackInstallerDownloadInProgress = false;
 let fallbackInstallerDownloadedPath: string | null = null;
+const desktopUpdateActions = createDesktopUpdateActions({
+  enabled: () => desktopAutoUpdateEnabled,
+  downloaded: () => desktopUpdateDownloaded,
+  canInstall: () => !printWorker?.getPublicState().service.processing,
+  download: async () => {
+    // A pending check owns electron-updater's updateInfoAndProvider. Wait for it
+    // before downloadUpdate reads that metadata; the action lock prevents new checks.
+    if (desktopUpdateCheckPromise) await desktopUpdateCheckPromise;
+    return autoUpdater.downloadUpdate();
+  },
+  install: (silent, forceRunAfter) => autoUpdater.quitAndInstall(silent, forceRunAfter),
+  schedule: (callback) => { setTimeout(callback, 200); },
+  onError: (error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    log("ERROR", "desktop update installation failed", message);
+    emitDesktopUpdateEvent({ type: "error", data: { message } });
+  },
+});
+
+async function detectDesktopPrinterPaper(config: { host?: string; port?: number } = {}) {
+  if (printWorker?.getPublicState().service.processing) return { ok: false as const, reason: "PRINT_JOBS_ACTIVE" };
+  return detectPrinterPaper(String(config?.host || "").trim(), config?.port == null ? 9100 : Number(config.port));
+}
 
 function getCredentialsPath() {
   return path.join(app.getPath("userData"), CREDENTIALS_FILE);
@@ -457,6 +486,17 @@ async function downloadWithRedirects(url: string, destinationPath: string, redir
 }
 
 async function downloadFallbackInstallerAsset() {
+  if (process.platform === "win32") {
+    if (!desktopAutoUpdateEnabled) return { ok: false, reason: "UPDATER_DISABLED" };
+    // Recovery must retain electron-updater's checksum verification. Do not run
+    // an arbitrary EXE merely because it has a valid Windows binary header.
+    try {
+      await checkForUpdatesWithFeedFallback();
+      return await desktopUpdateActions.download();
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
   if (fallbackInstallerDownloadInProgress) {
     return {
       ok: false,
@@ -519,6 +559,10 @@ async function downloadFallbackInstallerAsset() {
 }
 
 async function installFallbackInstallerAsset() {
+  if (process.platform === "win32") {
+    if (!desktopAutoUpdateEnabled) return { ok: false, reason: "UPDATER_DISABLED" };
+    return desktopUpdateActions.install();
+  }
   const installerPath = fallbackInstallerDownloadedPath;
   if (!installerPath) {
     return {
@@ -541,27 +585,8 @@ async function installFallbackInstallerAsset() {
       data: { filePath: installerPath },
     });
 
-    if (process.platform === "win32") {
-      const opened = await shell.openPath(installerPath);
-      if (opened) {
-        const command = process.env.ComSpec || "cmd.exe";
-        const escapedPath = installerPath.replace(/"/g, '""');
-        const child = spawn(command, ["/d", "/s", "/c", `start "" "${escapedPath}"`], {
-          detached: true,
-          stdio: "ignore",
-          windowsHide: true,
-        });
-        child.unref();
-      }
-    } else {
-      const opened = await shell.openPath(installerPath);
-      if (opened) {
-        return {
-          ok: false,
-          reason: opened,
-        };
-      }
-    }
+    const opened = await shell.openPath(installerPath);
+    if (opened) return { ok: false, reason: opened };
 
     setTimeout(() => {
       app.quit();
@@ -938,6 +963,7 @@ function setupAutoUpdaterScaffold() {
 
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.autoRunAppAfterInstall = true;
   autoUpdater.logger = null;
 
   const explicitUpdateUrl = String(runtimeConfig.MANGIAMO_DESKTOP_UPDATE_URL || "").trim();
@@ -965,6 +991,7 @@ function setupAutoUpdaterScaffold() {
   });
 
   autoUpdater.on("update-available", (info) => {
+    if (desktopUpdateDownloaded || desktopUpdateActions.downloading || desktopUpdateActions.installing) return;
     desktopUpdateAvailable = true;
     desktopUpdateDownloaded = false;
     desktopUpdateInfo = {
@@ -983,6 +1010,7 @@ function setupAutoUpdaterScaffold() {
   });
 
   autoUpdater.on("update-not-available", (info) => {
+    if (desktopUpdateDownloaded || desktopUpdateActions.downloading || desktopUpdateActions.installing) return;
     desktopUpdateAvailable = false;
     desktopUpdateDownloaded = false;
     desktopUpdateInfo = {
@@ -1028,6 +1056,7 @@ function setupAutoUpdaterScaffold() {
   });
 
   autoUpdater.on("error", (error) => {
+    desktopUpdateActions.resetInstall();
     desktopUpdateCheckInProgress = false;
     const message = error instanceof Error ? error.message : String(error);
     log("WARN", "desktop updater error", message);
@@ -1052,12 +1081,26 @@ function configureDesktopUpdaterFeed(feedUrl: string) {
   }
 }
 
-function isUnauthorizedUpdaterError(error: unknown) {
+function isRecoverableUpdaterFeedError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error || "");
-  return /401|unauthorized|status code 401/i.test(message);
+  return /\b(?:401|403|404|408|429|5\d\d)\b|unauthorized|net::|econnreset|econnrefused|enotfound|etimedout/i.test(message);
 }
 
-async function checkForUpdatesWithFeedFallback() {
+function checkForUpdatesWithFeedFallback() {
+  if (desktopUpdateCheckPromise) return desktopUpdateCheckPromise;
+  // A check emits update-available again, invalidating an already verified download.
+  // Keep its provider/metadata stable until the transfer or installation finishes.
+  if (desktopUpdateDownloaded || desktopUpdateActions.downloading || desktopUpdateActions.installing) {
+    return Promise.resolve({ updateInfo: desktopUpdateInfo });
+  }
+  desktopUpdateCheckPromise = checkDesktopUpdaterFeeds().finally(() => {
+    desktopUpdateCheckPromise = null;
+    desktopUpdateCheckInProgress = false;
+  });
+  return desktopUpdateCheckPromise;
+}
+
+async function checkDesktopUpdaterFeeds() {
   const attempts = Math.max(1, desktopUpdateFeedCandidates.length);
   let lastError: unknown = null;
 
@@ -1067,7 +1110,8 @@ async function checkForUpdatesWithFeedFallback() {
     } catch (error) {
       lastError = error;
       const canSwitch =
-        isUnauthorizedUpdaterError(error) &&
+        !desktopUpdateDownloaded && !desktopUpdateActions.downloading && !desktopUpdateActions.installing &&
+        isRecoverableUpdaterFeedError(error) &&
         desktopUpdateFeedCandidates.length > 1 &&
         attempt < attempts - 1;
 
@@ -1077,7 +1121,7 @@ async function checkForUpdatesWithFeedFallback() {
 
       desktopUpdateFeedIndex = (desktopUpdateFeedIndex + 1) % desktopUpdateFeedCandidates.length;
       const nextFeed = desktopUpdateFeedCandidates[desktopUpdateFeedIndex];
-      log("WARN", "desktop updater unauthorized response, switching feed", {
+      log("WARN", "desktop updater unavailable feed, switching feed", {
         nextFeed,
       });
       configureDesktopUpdaterFeed(nextFeed);
@@ -1401,6 +1445,8 @@ app
         checking: desktopUpdateCheckInProgress,
         available: desktopUpdateAvailable,
         downloaded: desktopUpdateDownloaded,
+        downloading: desktopUpdateActions.downloading,
+        installing: desktopUpdateActions.installing,
         currentVersion: app.getVersion(),
         updateInfo: desktopUpdateInfo || null,
       };
@@ -1412,28 +1458,7 @@ app
           reason: app.isPackaged ? "DISABLED_BY_CONFIG" : "NOT_PACKAGED",
         };
       }
-      try {
-        await autoUpdater.downloadUpdate();
-        if (!desktopUpdateDownloaded) {
-          desktopUpdateAvailable = true;
-          desktopUpdateDownloaded = true;
-          desktopUpdateCheckInProgress = false;
-          emitDesktopUpdateEvent({
-            type: "update-downloaded",
-            data: {
-              version: desktopUpdateInfo?.version || null,
-            },
-          });
-        }
-        return {
-          ok: true,
-        };
-      } catch (error) {
-        return {
-          ok: false,
-          error: error instanceof Error ? error.message : String(error),
-        };
-      }
+      return desktopUpdateActions.download();
     });
     ipcMain.handle("desktop:install-update", async () => {
       if (!desktopAutoUpdateEnabled) {
@@ -1442,18 +1467,7 @@ app
           reason: app.isPackaged ? "DISABLED_BY_CONFIG" : "NOT_PACKAGED",
         };
       }
-      if (!desktopUpdateDownloaded) {
-        return {
-          ok: false,
-          reason: "UPDATE_NOT_DOWNLOADED",
-        };
-      }
-      setTimeout(() => {
-        autoUpdater.quitAndInstall(false, true);
-      }, 200);
-      return {
-        ok: true,
-      };
+      return desktopUpdateActions.install();
     });
     ipcMain.handle("desktop:download-installer-fallback", async () => {
       return downloadFallbackInstallerAsset();
@@ -1492,6 +1506,7 @@ app
       const timeoutMs = Number((payload as Record<string, unknown> | null)?.timeoutMs);
       return printWorker.discoverPrinters(Number.isFinite(timeoutMs) ? timeoutMs : undefined);
     });
+    ipcMain.handle("desktop:printer:detect-paper", async (_event, payload) => detectDesktopPrinterPaper(payload || {}));
     ipcMain.handle("desktop:printer:discover-rt", async (_event, payload) => {
       if (!printWorker) throw new Error("PRINT_WORKER_UNAVAILABLE");
       const timeoutMs = Number((payload as Record<string, unknown> | null)?.timeoutMs);

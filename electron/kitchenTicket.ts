@@ -1,6 +1,16 @@
 export type TicketAlignment = "left" | "center" | "right";
 export type EscPosSize = "normal" | "double";
 export type EscPosFont = "A" | "B";
+export type TicketSection = "header" | "table" | "items" | "notes" | "guest" | "timestamp" | "footer";
+export type TicketBlock = "header" | "table" | "items" | "timestamp" | "footer";
+export const TICKET_BLOCK_ORDER: TicketBlock[] = ["header", "table", "items", "timestamp", "footer"];
+export interface TicketTextStyle {
+  font: EscPosFont;
+  size: EscPosSize;
+  bold: boolean;
+  align: TicketAlignment;
+  space_after: 0 | 1 | 2;
+}
 
 export type LineType = "header" | "table" | "timestamp" | "item" | "item_sub" | "separator" | "footer" | "blank";
 
@@ -10,6 +20,9 @@ export interface AnnotatedLine {
   size: EscPosSize;
   bold: boolean;
   align?: TicketAlignment;
+  font?: EscPosFont;
+  section?: TicketSection;
+  block?: TicketBlock;
 }
 
 // ─── Kitchen layout ─────────────────────────────────────────────────────────
@@ -45,9 +58,11 @@ export interface KitchenLayoutConfig {
     custom_text: string;
   };
   separator_char: "-" | "=" | "*";
-  width: 32 | 42 | 48 | 80;
+  width: 30 | 32 | 42 | 48 | 80;
   font: EscPosFont;
-  printable_dots: 384 | 512 | 576 | 960;
+  printable_dots: 360 | 384 | 512 | 576 | 960;
+  styles?: Partial<Record<TicketSection, Partial<TicketTextStyle>>>;
+  block_order?: TicketBlock[];
 }
 
 export const DEFAULT_KITCHEN_LAYOUT: KitchenLayoutConfig = {
@@ -94,9 +109,25 @@ export function normalizeKitchenLayout(raw: unknown): KitchenLayoutConfig {
   const it = r.items && typeof r.items === "object" ? (r.items as Record<string, unknown>) : {};
   const ft = r.footer && typeof r.footer === "object" ? (r.footer as Record<string, unknown>) : {};
   const font = r.font === 'B' ? 'B' : 'A';
-  const requestedWidth = ([32, 42, 48, 80] as number[]).includes(Number(r.width)) ? Number(r.width) : d.width;
-  const printableDots = ([384, 512, 576, 960] as number[]).includes(Number(r.printable_dots)) ? Number(r.printable_dots) : requestedWidth === 80 ? 960 : 576;
-  const width = Math.max(...[32, 42, 48, 80].filter(value => value <= requestedWidth && value * (font === 'A' ? 12 : 9) <= printableDots)) as KitchenLayoutConfig['width'];
+  const requestedWidth = ([30, 32, 42, 48, 80] as number[]).includes(Number(r.width)) ? Number(r.width) : d.width;
+  const printableDots = ([360, 384, 512, 576, 960] as number[]).includes(Number(r.printable_dots)) ? Number(r.printable_dots) : requestedWidth === 80 ? 960 : 576;
+  const width = Math.max(...[30, 32, 42, 48, 80].filter(value => value <= requestedWidth && value * (font === 'A' ? 12 : 9) <= printableDots)) as KitchenLayoutConfig['width'];
+  const styles: KitchenLayoutConfig['styles'] = {};
+  const rawStyles = r.styles && typeof r.styles === 'object' ? r.styles as Record<string, unknown> : {};
+  for (const section of [...TICKET_BLOCK_ORDER, 'notes', 'guest'] as TicketSection[]) {
+    const candidate = rawStyles[section];
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+    const value = candidate as Record<string, unknown>;
+    const style: Partial<TicketTextStyle> = {};
+    if (value.font === 'A' || value.font === 'B') style.font = value.font;
+    if (value.size === 'normal' || value.size === 'double') style.size = value.size;
+    if (typeof value.bold === 'boolean') style.bold = value.bold;
+    if (value.align === 'left' || value.align === 'center' || value.align === 'right') style.align = value.align;
+    if (value.space_after === 0 || value.space_after === 1 || value.space_after === 2) style.space_after = value.space_after;
+    if (Object.keys(style).length) styles[section] = style;
+  }
+  const rawOrder = r.block_order;
+  const blockOrder = Array.isArray(rawOrder) ? [...new Set(rawOrder.filter((value): value is TicketBlock => TICKET_BLOCK_ORDER.includes(value as TicketBlock))), ...TICKET_BLOCK_ORDER.filter(value => !rawOrder.includes(value))] : undefined;
 
   return {
     align: r.align === "left" || r.align === "right" ? r.align : "center",
@@ -132,7 +163,15 @@ export function normalizeKitchenLayout(raw: unknown): KitchenLayoutConfig {
     width,
     font,
     printable_dots: printableDots as KitchenLayoutConfig['printable_dots'],
+    ...(Object.keys(styles).length ? { styles } : {}),
+    ...(blockOrder ? { block_order: blockOrder } : {}),
   };
+}
+
+/** Explicit edits override legacy controls without freezing their defaults. */
+export function ticketSectionStyle(layout: KitchenLayoutConfig, section: TicketSection): TicketTextStyle {
+  const legacy = section === 'header' ? layout.header : section === 'table' ? layout.table : section === 'items' ? layout.items : undefined;
+  return { font: layout.font, size: legacy?.size ?? 'normal', bold: legacy?.bold ?? false, align: layout.align, space_after: 0, ...layout.styles?.[section] };
 }
 
 
@@ -278,18 +317,24 @@ export function renderKitchenTicketCore(
   const createdAt = formatTimestamp(payload.created_at);
   const jobId = toStringValue(options?.jobId).trim();
 
-  const lines: AnnotatedLine[] = [];
-
-  const addLine = (text: string, type: AnnotatedLine["type"], size: AnnotatedLine["size"] = "normal", bold = false) => {
-    const indent = type === 'item_sub' && layout.align === 'left' ? ' ' : '';
-    const columns = Math.max(1, Math.floor(width / (size === 'double' ? 2 : 1)) - indent.length);
-    for (const chunk of wrapTicketText(text, columns)) lines.push({ text: indent + chunk, type, size, bold, align: layout.align });
+  let lines: AnnotatedLine[] = [];
+  let block: TicketBlock = 'header';
+  const addLine = (text: string, type: AnnotatedLine["type"], size: EscPosSize = "normal", bold = false, section: TicketSection = block, operational = false) => {
+    const styled = type !== 'separator' && type !== 'blank';
+    const style = styled ? ticketSectionStyle(layout, section) : { font: layout.font, align: layout.align, size, bold, space_after: 0 };
+    // Service headings remain mandatory operational instructions, even with a hidden header.
+    const effective = operational && !layout.styles?.header ? { ...style, size, bold } : style;
+    const indent = type === 'item_sub' && effective.align === 'left' ? ' ' : '';
+    const scale = effective.size === 'double' ? 2 : 1;
+    const capacity = Math.min(Math.floor(width / scale), Math.floor(layout.printable_dots / ((effective.font === 'A' ? 12 : 9) * scale)));
+    for (const chunk of wrapTicketText(text, Math.max(1, capacity - indent.length))) lines.push({ text: indent + chunk, type, size: effective.size, bold: effective.bold, align: effective.align, font: effective.font, section, block });
+    for (let i = 0; i < effective.space_after; i++) lines.push({ text: '', type: 'blank', size: 'normal', bold: false, align: effective.align, font: effective.font, section, block });
   };
   const addSep = (char = sepChar) => addLine(separator(char, width), "separator");
   const addBlank = () => addLine("", "blank");
 
   if (service) {
-    for (const heading of headings) addLine(heading, "header", "normal", true);
+    for (const heading of headings) addLine(heading, "header", "normal", true, "header", true);
     addSep("=");
   }
 
@@ -306,6 +351,7 @@ export function renderKitchenTicketCore(
   addSep();
   addBlank();
 
+  block = 'table';
   // ── Table ────────────────────────────────────────────────────────────────
   if (layout.table.visible) {
     const tableText = `${layout.table.label}: ${tableLabel}`;
@@ -313,6 +359,7 @@ export function renderKitchenTicketCore(
     addBlank();
   }
 
+  block = 'items';
   // ── Items ────────────────────────────────────────────────────────────────
   if (layout.items.visible || service) {
     for (const item of items) {
@@ -326,14 +373,14 @@ export function renderKitchenTicketCore(
       if (layout.items.show_guest_name) {
         const guest = toStringValue(item.guest_name).trim();
         if (guest) {
-          addLine(`Ospite: ${guest}`, "item_sub");
+          addLine(`Ospite: ${guest}`, "item_sub", "normal", false, "guest");
         }
       }
 
       if (layout.items.show_notes) {
         const notes = toStringValue(item.notes).trim();
         if (notes) {
-          addLine(`Nota: ${notes}`, "item_sub");
+          addLine(`Nota: ${notes}`, "item_sub", "normal", false, "notes");
         }
       }
 
@@ -357,7 +404,7 @@ export function renderKitchenTicketCore(
               : "";
             line = `${prefix}${modifierName}${qtySuffix}${priceSuffix}`;
           }
-          addLine(line, "item_sub");
+          addLine(line, "item_sub", "normal", false, "notes");
         }
       }
     }
@@ -365,11 +412,16 @@ export function renderKitchenTicketCore(
 
   addSep();
 
+  block = 'footer';
   // ── Footer ───────────────────────────────────────────────────────────────
   if (layout.footer.visible) {
     const footerParts: string[] = [];
     if (layout.footer.show_restaurant_name) footerParts.push(restaurantName);
-    if (layout.footer.show_timestamp && createdAt) footerParts.push(createdAt);
+    const separateTimestamp = !!layout.block_order || !!layout.styles?.timestamp || !!layout.styles?.footer;
+    if (layout.footer.show_timestamp && createdAt) {
+      if (separateTimestamp) { block = 'timestamp'; addLine(createdAt, 'timestamp'); block = 'footer'; }
+      else footerParts.push(createdAt);
+    }
     const footerLine = footerParts.join(" - ");
     if (footerLine) addLine(footerLine, "footer");
     if (layout.footer.custom_text.trim()) {
@@ -379,11 +431,14 @@ export function renderKitchenTicketCore(
 
   addSep("=");
 
+  if (layout.block_order) lines = layout.block_order.flatMap(value => lines.filter(line => line.block === value));
   const text = lines.map((l) => l.text).join("\n");
   const htmlLines = lines
     .map((l) => {
       const styles: string[] = [];
-      if (l.size === "double") styles.push("font-size:2em");
+      const fontScale = l.font === 'B' ? 0.75 : 1;
+      if (l.size === "double" && fontScale === 1) styles.push("font-size:2em");
+      else if (fontScale !== 1) styles.push(`font-size:${fontScale * (l.size === 'double' ? 2 : 1)}em`);
       styles.push(`display:block;text-align:${l.align ?? "left"}`);
       if (l.bold) styles.push("font-weight:bold");
       const style = styles.join(";");
@@ -406,8 +461,10 @@ export function buildKitchenEscPos(lines: AnnotatedLine[], rawLayout?: unknown):
     29, 76, 0, 0, 29, 87, dots & 255, dots >> 8];
   const encoder = new TextEncoder();
   for (const line of lines) {
+    const font = line.font ?? layout.font;
+    bytes.push(27, 77, font === 'A' ? 0 : 1);
     bytes.push(27, 97, line.align === 'right' ? 2 : line.align === 'left' ? 0 : 1);
-    const lineDots = Math.max(36, (layout.font === 'A' ? 24 : 17) * (line.size === 'double' ? 2 : 1) + 8);
+    const lineDots = Math.max(36, (font === 'A' ? 24 : 17) * (line.size === 'double' ? 2 : 1) + 8);
     bytes.push(27, 69, line.bold ? 1 : 0, 29, 33, line.size === 'double' ? 17 : 0, 27, 51, lineDots);
     // eslint-disable-next-line no-control-regex -- prevent ESC/POS command injection from ticket text.
     bytes.push(...encoder.encode(line.text.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ') + '\n'));
