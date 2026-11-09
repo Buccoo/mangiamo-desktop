@@ -28,6 +28,24 @@ const sample = { table_number: '5', restaurant_name: 'Fixture', order_number: 7,
   { name: 'Gyoza Fritti', quantity: 1, item_number: 2, notes: 'senza aglio', modifiers: [{ name: 'Wasabi', modifier_type: 'remove' }] },
 ] };
 
+test('actual transport resolves CUSTOM metrics for its endpoint and leaves other printers native', async () => {
+  const layout = { width: 80, printable_dots: 960, printer_profiles: { 'fixture-only:9100': 'custom-kube-ii' } };
+  const resolved = core.resolveKitchenPrinterLayout(layout, 'fixture-only');
+  const bytes = await print({ department: 'cucina', payload: sample }, layout);
+  assert.deepEqual(bytes, Buffer.from(core.buildKitchenEscPos(core.renderKitchenTicketCore(sample, { layout: resolved }).lines, resolved)));
+  assert.ok(bytes.includes(Buffer.from([27, 193, 1])));
+  const other = await print({ department: 'cucina', payload: sample }, { ...layout, printer_profiles: { 'other:9100': 'custom-kube-ii' } });
+  assert.ok(!other.includes(Buffer.from([27, 193, 1])));
+});
+
+test('a CUSTOM layout-test snapshot keeps its resolved endpoint profile for both wrapping and transport', async () => {
+  const layout = { width: 80, printable_dots: 960, printer_profiles: { 'fixture-only:9100': 'custom-kube-ii' } };
+  const payload = { ...sample, items: [{ name: 'Sushi Assortito Gyoza Fritti Gamberi Viola di Gallipoli', quantity: 2 }], layout_test: true, layout: { kitchen: layout } };
+  const resolved = core.resolveKitchenPrinterLayout(layout, 'fixture-only');
+  const bytes = await print({ department: 'cucina', payload }, { width: 32, printable_dots: 384 });
+  assert.deepEqual(bytes, Buffer.from(core.buildKitchenEscPos(core.renderKitchenTicketCore(payload, { layout: resolved }).lines, resolved)));
+});
+
 test('actual transport honors Grande, font, alignment, footer and resets before cutting', async () => {
   for (const font of ['A', 'B']) for (const align of ['left', 'center', 'right']) for (const size of ['normal', 'double']) {
     const layout = { font, align, width: 32, items: { size, bold: true }, table: { label: 'POSTAZIONE' }, footer: { custom_text: 'Buon lavoro' } };

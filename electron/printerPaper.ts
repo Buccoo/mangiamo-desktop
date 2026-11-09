@@ -4,10 +4,47 @@ export type PrinterPaperProfile = {
   width_mm: 58 | 80;
   printable_dots: 360 | 384 | 512 | 576;
   model: string;
-  source: 'escpos';
+  source: 'escpos' | 'model-profile';
+  native_profile?: 'custom-kube-ii';
+  dpi?: number;
+  firmware?: string;
 };
 export type PrinterPaperResult = { ok: true; paper: PrinterPaperProfile } | { ok: false; reason: string };
 type Exchange = (host: string, port: number, query: Buffer) => Promise<Buffer>;
+type ReadPage = (host: string, path: '/' | '/info.htm') => Promise<string>;
+
+/** Identity comes from two fixed read-only device pages. Never execute their JS.
+ * KUBE II's active width/CPI setup can require authentication. This is explicitly
+ * a conservative 72mm model profile (below both documented 76/80mm areas), not
+ * a measurement of the currently fitted roll or the protected device settings.
+ * CUSTOM DOMC-0006I and KUBE II ETH user guide 769000000332_2.01.
+ */
+export function parseCustomPrinterPages(index: string, info: string): PrinterPaperProfile | null {
+  if (index.length > 65536 || info.length > 65536 || !/<title>\s*KUBE II ETH PRINTER\s*-\s*CUSTOM ENGINEERING\s*<\/title>/i.test(index)) return null;
+  if (!/\bTab\(\s*["']Printer Model:["']\s*,\s*["']KUBE II ETH["']\s*\)/.test(info)) return null;
+  const firmware = info.match(/\bTab\(\s*["']Firmware Version:["']\s*,\s*["']([0-9.]{1,16})["']\s*\)/)?.[1];
+  return { width_mm: 80, printable_dots: 576, model: 'CUSTOM KUBE II ETH', source: 'model-profile', native_profile: 'custom-kube-ii', dpi: 203, ...(firmware ? { firmware } : {}) };
+}
+
+async function readPrinterPage(host: string, path: '/' | '/info.htm'): Promise<string> {
+  const authority = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+  const response = await fetch(`http://${authority}${path}`, { method: 'GET', redirect: 'error', signal: AbortSignal.timeout(1200), credentials: 'omit' });
+  if (!response.ok || !/text\/(?:html|plain)/i.test(response.headers.get('content-type') || '')) { await response.body?.cancel(); throw new Error('PRINTER_INFO_UNAVAILABLE'); }
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('PRINTER_INFO_EMPTY');
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      size += value.length;
+      if (size > 65536) throw new Error('PRINTER_INFO_TOO_LARGE');
+      chunks.push(value);
+    }
+  } finally { await reader.cancel(); }
+  return Buffer.concat(chunks).toString('utf8');
+}
 
 // GS I 110 has model-specific meanings. Only interpret the width/resolution
 // bit field for models whose Epson command reference documents that format.
@@ -59,8 +96,19 @@ function exchangeInformation(host: string, port: number, query: Buffer): Promise
 }
 
 /** Read-only printer queries: no reset, feed, cut, paper setting or print data. */
-export async function detectPrinterPaper(host: string, port = 9100, exchange: Exchange = exchangeInformation): Promise<PrinterPaperResult> {
+export async function detectPrinterPaper(host: string, port = 9100, exchange: Exchange = exchangeInformation, readPage: ReadPage | undefined = exchange === exchangeInformation ? readPrinterPage : undefined): Promise<PrinterPaperResult> {
   if (typeof host !== 'string' || !/^[a-zA-Z0-9.:[\]_-]{1,253}$/.test(host) || !Number.isInteger(port) || port < 1 || port > 65535) return { ok: false, reason: 'INVALID_PRINTER' };
+  if (port === 9100 && readPage) {
+    try {
+      const index = await readPage(host, '/');
+      if (/<title>\s*KUBE II ETH PRINTER\s*-\s*CUSTOM ENGINEERING\s*<\/title>/i.test(index)) {
+        try {
+          const paper = parseCustomPrinterPages(index, await readPage(host, '/info.htm'));
+          return paper ? { ok: true, paper } : { ok: false, reason: 'PAPER_NOT_DETECTED' };
+        } catch { return { ok: false, reason: 'PAPER_NOT_DETECTED' }; }
+      }
+    } catch { /* Missing/unsupported web interface: try the documented Epson queries. */ }
+  }
   try {
     const maker = informationText(await exchange(host, port, Buffer.from([29, 73, 66])));
     if (maker !== 'EPSON') return { ok: false, reason: 'UNSUPPORTED_PRINTER' };

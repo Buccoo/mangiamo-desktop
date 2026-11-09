@@ -23,6 +23,8 @@ export interface AnnotatedLine {
   font?: EscPosFont;
   section?: TicketSection;
   block?: TicketBlock;
+  cell_dots?: number;
+  glyph_dots?: number;
 }
 
 // ─── Kitchen layout ─────────────────────────────────────────────────────────
@@ -63,6 +65,8 @@ export interface KitchenLayoutConfig {
   printable_dots: 360 | 384 | 512 | 576 | 960;
   styles?: Partial<Record<TicketSection, Partial<TicketTextStyle>>>;
   block_order?: TicketBlock[];
+  printer_profiles?: Record<string, 'custom-kube-ii'>;
+  native_profile?: 'custom-kube-ii';
 }
 
 export const DEFAULT_KITCHEN_LAYOUT: KitchenLayoutConfig = {
@@ -128,6 +132,13 @@ export function normalizeKitchenLayout(raw: unknown): KitchenLayoutConfig {
   }
   const rawOrder = r.block_order;
   const blockOrder = Array.isArray(rawOrder) ? [...new Set(rawOrder.filter((value): value is TicketBlock => TICKET_BLOCK_ORDER.includes(value as TicketBlock))), ...TICKET_BLOCK_ORDER.filter(value => !rawOrder.includes(value))] : undefined;
+  const profiles: Record<string, 'custom-kube-ii'> = {};
+  if (r.printer_profiles && typeof r.printer_profiles === 'object' && !Array.isArray(r.printer_profiles)) {
+    for (const [key, value] of Object.entries(r.printer_profiles).slice(0, 64)) {
+      const port = Number(key.slice(key.lastIndexOf(':') + 1));
+      if (/^[a-zA-Z0-9.:[\]_-]{1,253}:\d{1,5}$/.test(key) && port >= 1 && port <= 65535 && value === 'custom-kube-ii') profiles[key.toLowerCase()] = value;
+    }
+  }
 
   return {
     align: r.align === "left" || r.align === "right" ? r.align : "center",
@@ -165,7 +176,30 @@ export function normalizeKitchenLayout(raw: unknown): KitchenLayoutConfig {
     printable_dots: printableDots as KitchenLayoutConfig['printable_dots'],
     ...(Object.keys(styles).length ? { styles } : {}),
     ...(blockOrder ? { block_order: blockOrder } : {}),
+    ...(Object.keys(profiles).length ? { printer_profiles: profiles } : {}),
+    ...(r.native_profile === 'custom-kube-ii' ? { native_profile: 'custom-kube-ii' as const } : {}),
   };
+}
+
+export function printerProfileKey(host: string, port = 9100) { return `${host.trim().toLowerCase()}:${port}`; }
+
+/** Resolve only the destination's profile. Never send CUSTOM-only commands to
+ * another printer sharing the restaurant's ticket layout. 576 dots is a safe
+ * 72mm subset of KUBE II's documented 76/80mm areas, not a roll measurement. */
+export function resolveKitchenPrinterLayout(raw: unknown, host: string, port = 9100): KitchenLayoutConfig {
+  const layout = normalizeKitchenLayout(raw);
+  delete layout.native_profile;
+  if (layout.printer_profiles?.[printerProfileKey(host, port)] === 'custom-kube-ii') {
+    layout.native_profile = 'custom-kube-ii';
+    layout.printable_dots = Math.min(layout.printable_dots, 576) as KitchenLayoutConfig['printable_dots'];
+  }
+  return layout;
+}
+
+export function ticketFontMetrics(layout: { native_profile?: string }, font: EscPosFont) {
+  return layout.native_profile === 'custom-kube-ii'
+    ? { cell: font === 'A' ? 14 : 10, glyph: 24 }
+    : { cell: font === 'A' ? 12 : 9, glyph: font === 'A' ? 24 : 17 };
 }
 
 /** Explicit edits override legacy controls without freezing their defaults. */
@@ -306,7 +340,7 @@ export function renderKitchenTicketCore(
   const headings = options?.serviceHeadings ?? [];
   const service = headings.length > 0;
   const layout = normalizeKitchenLayout(options?.layout);
-  const width = layout.width;
+  const width = Math.min(layout.width, Math.floor(layout.printable_dots / ticketFontMetrics(layout, layout.font).cell));
   const sepChar = layout.separator_char;
 
   const items = Array.isArray(payload.items) ? payload.items : [];
@@ -326,8 +360,9 @@ export function renderKitchenTicketCore(
     const effective = operational && !layout.styles?.header ? { ...style, size, bold } : style;
     const indent = type === 'item_sub' && effective.align === 'left' ? ' ' : '';
     const scale = effective.size === 'double' ? 2 : 1;
-    const capacity = Math.min(Math.floor(width / scale), Math.floor(layout.printable_dots / ((effective.font === 'A' ? 12 : 9) * scale)));
-    for (const chunk of wrapTicketText(text, Math.max(1, capacity - indent.length))) lines.push({ text: indent + chunk, type, size: effective.size, bold: effective.bold, align: effective.align, font: effective.font, section, block });
+    const metric = ticketFontMetrics(layout, effective.font);
+    const capacity = Math.min(Math.floor(width / scale), Math.floor(layout.printable_dots / (metric.cell * scale)));
+    for (const chunk of wrapTicketText(text, Math.max(1, capacity - indent.length))) lines.push({ text: indent + chunk, type, size: effective.size, bold: effective.bold, align: effective.align, font: effective.font, section, block, ...(layout.native_profile ? { cell_dots: metric.cell, glyph_dots: metric.glyph } : {}) });
     for (let i = 0; i < effective.space_after; i++) lines.push({ text: '', type: 'blank', size: 'normal', bold: false, align: effective.align, font: effective.font, section, block });
   };
   const addSep = (char = sepChar) => addLine(separator(char, width), "separator");
@@ -459,12 +494,14 @@ export function buildKitchenEscPos(lines: AnnotatedLine[], rawLayout?: unknown):
   const dots = layout.printable_dots;
   const bytes: number[] = [27, 64, 27, 77, layout.font === 'A' ? 0 : 1, 27, 32, 0,
     29, 76, 0, 0, 29, 87, dots & 255, dots >> 8];
+  // CUSTOM DOMC-0006I: explicitly choose A=15 / B=20 CPI for this ticket.
+  if (layout.native_profile === 'custom-kube-ii') bytes.push(27, 193, 1);
   const encoder = new TextEncoder();
   for (const line of lines) {
     const font = line.font ?? layout.font;
     bytes.push(27, 77, font === 'A' ? 0 : 1);
     bytes.push(27, 97, line.align === 'right' ? 2 : line.align === 'left' ? 0 : 1);
-    const lineDots = Math.max(36, (font === 'A' ? 24 : 17) * (line.size === 'double' ? 2 : 1) + 8);
+    const lineDots = Math.max(36, ticketFontMetrics(layout, font).glyph * (line.size === 'double' ? 2 : 1) + 8);
     bytes.push(27, 69, line.bold ? 1 : 0, 29, 33, line.size === 'double' ? 17 : 0, 27, 51, lineDots);
     // eslint-disable-next-line no-control-regex -- prevent ESC/POS command injection from ticket text.
     bytes.push(...encoder.encode(line.text.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ') + '\n'));

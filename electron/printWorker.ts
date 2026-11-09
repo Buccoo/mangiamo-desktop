@@ -10,7 +10,7 @@ import type * as PrintDelivery from "./printDelivery";
 const { LocalPrintJournal, PrintNotSentError, deliverPrintJob } = require("./printDelivery.cjs") as typeof PrintDelivery;
 
 import type * as KitchenTicket from "./kitchenTicket";
-const { renderKitchenTicketCore, buildKitchenEscPos } = require("./kitchenTicket.cjs") as typeof KitchenTicket;
+const { renderKitchenTicketCore, buildKitchenEscPos, resolveKitchenPrinterLayout } = require("./kitchenTicket.cjs") as typeof KitchenTicket;
 
 import type * as ReceiptTicket from "./receiptTicket";
 const { renderNonFiscalReceiptTicket: renderReceiptCore } = require("./receiptTicket.cjs") as typeof ReceiptTicket;
@@ -418,7 +418,9 @@ function renderPinSlip(job: JobRow) {
 function renderAnnotatedKitchenTicket(job: JobRow, liveLayout?: unknown) {
   const payload = (job.payload || {}) as Record<string, unknown>;
   const snapshot = payload.layout && typeof payload.layout === 'object' ? payload.layout as Record<string, unknown> : {};
-  const layout = payload.layout_test === true ? snapshot.kitchen : liveLayout ?? snapshot.kitchen;
+  // The caller selects snapshot vs live settings and resolves the destination's
+  // hardware profile before rendering. Keep that exact geometry for test jobs too.
+  const layout = liveLayout ?? snapshot.kitchen;
   return renderKitchenTicketCore({ ...payload, department: String(payload.department || job.department || 'cucina'), created_at: String(payload.created_at || job.created_at || '') } as KitchenTicket.KitchenTicketPayload, { layout });
 }
 function renderTicket(job: JobRow, layout?: unknown) {
@@ -1316,7 +1318,7 @@ export class DesktopPrintWorker {
     const port = sanitizePrinterPort(routeOverride?.port);
     if (!host) throw new PrintNotSentError("NO_PRINTER_HOST");
     const snapshot = (job.payload?.layout ?? {}) as Record<string, unknown>;
-    const chosenLayout = job.payload?.layout_test === true ? snapshot.kitchen : kitchenLayout ?? snapshot.kitchen;
+    const chosenLayout = resolveKitchenPrinterLayout(job.payload?.layout_test === true ? snapshot.kitchen : kitchenLayout ?? snapshot.kitchen, host, port);
     const payload = isPinSlipJob(job) ? buildEscPosPayload(renderPinSlip(job), { pinSlip: true })
       : Buffer.from(buildKitchenEscPos(renderAnnotatedKitchenTicket(job, chosenLayout).lines, chosenLayout));
     let lastError: unknown = null;
