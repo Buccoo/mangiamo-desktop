@@ -593,9 +593,8 @@ function getLinePrintSize(line: string) {
 function buildEscPosPayload(ticketText: string, options?: { align?: "left" | "center"; pinSlip?: boolean }) {
   const ESC = 0x1b;
   const GS = 0x1d;
-  // Keep the working kitchen feed/cut sequence: one line can leave a short
-  // PIN slip behind the cutter, where it cannot be collected or detached.
-  const EXTRA_FEED_LINES = 5;
+  // Leave three extra blank lines below the PIN before cutting the slip.
+  const EXTRA_FEED_LINES = options?.pinSlip ? 8 : 5;
   const lines = ticketText.split(/\r?\n/);
   const alignCenter = options?.pinSlip || options?.align === "center";
   const chunks = [

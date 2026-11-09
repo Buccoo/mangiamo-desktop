@@ -72,14 +72,14 @@ async function actualPrintBytes(job) {
   return printed;
 }
 
-test("actual PIN bytes enlarge only the PIN and reach the same cutter position as working kitchen tickets", async () => {
+test("actual PIN bytes enlarge only the PIN and leave eight blank lines before cutting", async () => {
   const printed = await actualPrintBytes(pinJob());
   assert.deepEqual(printed, Buffer.concat([
     Buffer.from([0x1b, 0x40, 0x1b, 0x4d, 0, 0x1b, 0x20, 2, 0x1b, 0x61, 1, 0x1b, 0x45, 1]),
     Buffer.from("TAV. 12\n"),
     Buffer.from([0x1d, 0x21, 0x11]),
     Buffer.from("PIN: 0123\n"),
-    Buffer.from([0x1b, 0x45, 0, 0x1d, 0x21, 0, 0x1b, 0x61, 0, 0x1b, 0x4d, 1, 0x1b, 0x64, 5, 0x1d, 0x56, 0]),
+    Buffer.from([0x1b, 0x45, 0, 0x1d, 0x21, 0, 0x1b, 0x61, 0, 0x1b, 0x4d, 1, 0x1b, 0x64, 8, 0x1d, 0x56, 0]),
   ]));
 });
 
@@ -118,7 +118,7 @@ test("the desktop sends the complete PIN and cut sequence to its explicit TCP de
       receiving,
     ]);
     assert.deepEqual(bytes, await actualPrintBytes(pinJob()));
-    assert.deepEqual(bytes.subarray(-6), Buffer.from([0x1b, 0x64, 5, 0x1d, 0x56, 0]));
+    assert.deepEqual(bytes.subarray(-6), Buffer.from([0x1b, 0x64, 8, 0x1d, 0x56, 0]));
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
