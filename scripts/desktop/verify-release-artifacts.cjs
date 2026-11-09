@@ -2,6 +2,8 @@ const fs=require('node:fs');const path=require('node:path');const crypto=require
 function verifyRelease(directory,version){
  const proof=JSON.parse(fs.readFileSync(path.join(directory,'packaged-startup-proof.json'),'utf8'));
  if(proof.schema_version!==1||proof.platform!=='win32'||proof.version!==version||proof.isPackaged!==true||proof.dependenciesLoaded!==true||proof.bridgeStarted!==false||proof.rendererStarted!==false)throw Error('Missing or invalid packaged Windows startup evidence');
+ const [major,minor,patch]=version.split('.').map(Number);
+ if((major>1||major===1&&(minor>5||minor===5&&patch>=54))&&proof.rasterFontsLoaded!==true)throw Error('Missing packaged raster font evidence');
  const installer=fs.readFileSync(path.join(directory,'Mangiamo-Desktop-Setup.exe'));
  const hash=crypto.createHash('sha512').update(installer).digest('base64');
  if(proof.installer_size!==installer.length||proof.installer_sha512!==hash)throw Error('Installer differs from the startup-verified artifact');

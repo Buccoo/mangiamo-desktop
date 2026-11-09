@@ -28,6 +28,45 @@ const sample = { table_number: '5', restaurant_name: 'Fixture', order_number: 7,
   { name: 'Gyoza Fritti', quantity: 1, item_number: 2, notes: 'senza aglio', modifiers: [{ name: 'Wasabi', modifier_type: 'remove' }] },
 ] };
 
+test('numeric point styles preserve unwrapped semantic text for the raster renderer and reject invalid values', () => {
+  const layout = core.normalizeKitchenLayout({ styles: { items: { size_pt: 13.5 }, table: { size_pt: 22 }, notes: { size_pt: 0 } }, raster: { dpi: 300, protocol: 'esc-star' } });
+  assert.equal(layout.styles.items.size_pt, 13.5);
+  assert.equal(layout.styles.table.size_pt, 22);
+  assert.equal(layout.styles.notes, undefined);
+  assert.deepEqual(layout.raster, { dpi: 300, protocol: 'esc-star' });
+  const text = 'GAMBERI VIOLA DI GALLIPOLI '.repeat(4).trim();
+  const rendered = core.renderKitchenTicketCore({ ...sample, items: [{ name: text, quantity: 1 }] }, { layout });
+  assert.equal(rendered.lines.filter(line => line.type === 'item').length, 1);
+  assert.equal(rendered.lines.find(line => line.type === 'item').text, '1x '+text);
+  assert.equal(rendered.lines.find(line => line.type === 'item').size_pt, 13.5);
+  assert.equal(core.normalizeKitchenLayout({styles:{items:{size_pt:Infinity}}}).styles, undefined);
+});
+
+test('actual numeric-point kitchen and receipt transports emit the exact shared raster pixels', async () => {
+  const fonts=require('../electron-dist/ticketFonts.cjs');
+  const layout={styles:{items:{size_pt:13.5},table:{size_pt:22}},raster:{dpi:203,protocol:'gs-v0'},printable_dots:576};
+  const normalized=core.resolveKitchenPrinterLayout(layout,'fixture-only');
+  const bytes=await print({department:'cucina',payload:sample},layout);
+  assert.deepEqual(bytes,fonts.buildPreciseTicket(core.renderKitchenTicketCore(sample,{layout:normalized}).lines,normalized));
+  const receiptCore=require('../electron-dist/receiptTicket.cjs');
+  const receiptLayout=receiptCore.normalizeReceiptLayout({sizes_pt:{header:12,total:20},printable_dots:384,raster:{dpi:203,protocol:'gs-v0'}});
+  assert.equal(receiptLayout.sizes_pt.total,20);
+  const payload={restaurant_name:'Fixture',table_number:'5',paid_at:'2026-11-09T12:00:00Z',total_amount:25,route:{host:'fixture-only'}};
+  const receiptBytes=await print({payload},receiptLayout,'sendToNonFiscalReceiptPrinter');
+  const lines=receiptCore.renderNonFiscalReceiptTicket(payload,{layout:receiptLayout}).lines;
+  assert.ok(lines.some(line=>line.size_pt===20));
+  assert.deepEqual(receiptBytes,fonts.buildPreciseTicket(lines,receiptLayout));
+});
+
+test('a receipt layout test uses detected destination geometry for physical point size',async()=>{
+ const receiptCore=require('../electron-dist/receiptTicket.cjs'),fonts=require('../electron-dist/ticketFonts.cjs');
+ const raw={sizes_pt:{total:18},printable_dots:960,raster:{dpi:300,protocol:'gs-v0'}};
+ const receipt=receiptCore.normalizeReceiptLayout({...raw,printable_dots:576,raster:{dpi:203,protocol:'gs-v0'}});
+ const payload={restaurant_name:'Fixture',table_number:'5',paid_at:'2026-11-09T12:00:00Z',total_amount:25,route:{host:'fixture-only'},layout_test:true,layout:{receipt:raw,kitchen:{printer_profiles:{'fixture-only:9100':'custom-kube-ii'}}}};
+ const bytes=await print({payload},raw,'sendToNonFiscalReceiptPrinter');
+ assert.deepEqual(bytes,fonts.buildPreciseTicket(receiptCore.renderNonFiscalReceiptTicket(payload,{layout:receipt}).lines,receipt));
+});
+
 test('actual transport resolves CUSTOM metrics for its endpoint and leaves other printers native', async () => {
   const layout = { width: 80, printable_dots: 960, printer_profiles: { 'fixture-only:9100': 'custom-kube-ii' } };
   const resolved = core.resolveKitchenPrinterLayout(layout, 'fixture-only');

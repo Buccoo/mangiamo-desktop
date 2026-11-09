@@ -2,6 +2,11 @@ const {test}=require('node:test');const assert=require('node:assert/strict');con
 const {verifyRelease}=require('../scripts/desktop/verify-release-artifacts.cjs');
 function fixture(){const dir=fs.mkdtempSync(path.join(os.tmpdir(),'mangiamo-release-gate-'));const bytes=Buffer.from('synthetic installer');const hash=crypto.createHash('sha512').update(bytes).digest('base64');const proof={schema_version:1,platform:'win32',version:'1.5.47',isPackaged:true,dependenciesLoaded:true,bridgeStarted:false,rendererStarted:false,installer_sha512:hash,installer_size:bytes.length};fs.writeFileSync(path.join(dir,'Mangiamo-Desktop-Setup.exe'),bytes);fs.writeFileSync(path.join(dir,'latest.yml'),'version: 1.5.47\nsha512: '+hash+'\n');fs.writeFileSync(path.join(dir,'packaged-startup-proof.json'),JSON.stringify(proof));return {dir,proof};}
 test('allows the exact startup-verified installer and manifest',()=>verifyRelease(fixture().dir,'1.5.47'));
+test('precise-size releases require packaged font rendering evidence',()=>{
+ const {dir,proof}=fixture();proof.version='1.5.54';fs.writeFileSync(path.join(dir,'packaged-startup-proof.json'),JSON.stringify(proof));fs.writeFileSync(path.join(dir,'latest.yml'),'version: 1.5.54\nsha512: '+proof.installer_sha512+'\n');
+ assert.throws(()=>verifyRelease(dir,'1.5.54'),/font/i);
+ proof.rasterFontsLoaded=true;fs.writeFileSync(path.join(dir,'packaged-startup-proof.json'),JSON.stringify(proof));assert.doesNotThrow(()=>verifyRelease(dir,'1.5.54'));
+});
 test('rejects an installer swapped after verification',()=>{const {dir}=fixture();fs.writeFileSync(path.join(dir,'Mangiamo-Desktop-Setup.exe'),'replacement');assert.throws(()=>verifyRelease(dir,'1.5.47'),/differs/);});
 test('rejects a release without packaged startup evidence',()=>{const {dir}=fixture();fs.renameSync(path.join(dir,'packaged-startup-proof.json'),path.join(dir,'proof-disabled.json'));assert.throws(()=>verifyRelease(dir,'1.5.47'));});
 test('rejects wrong versions and a manifest targeting another artifact',()=>{const {dir}=fixture();assert.throws(()=>verifyRelease(dir,'1.5.48'));fs.writeFileSync(path.join(dir,'latest.yml'),'version: 1.5.47\nsha512: other\n');assert.throws(()=>verifyRelease(dir,'1.5.47'),/manifest/);});

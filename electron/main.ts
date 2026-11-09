@@ -1297,7 +1297,10 @@ app
   .whenReady()
   .then(async () => {
     if (startupSmokeDirectory) {
-      fs.writeFileSync(path.join(startupSmokeDirectory, "startup-proof.json"), JSON.stringify({ version: app.getVersion(), isPackaged: app.isPackaged, dependenciesLoaded: true, userDataPath: app.getPath("userData"), bridgeStarted: false, rendererStarted: false }));
+      const {buildPreciseTicket}=require('./ticketFonts.cjs') as typeof import('./ticketFonts');
+      const image=buildPreciseTicket([{text:'Formato 中文 🍣 13,5 pt',size_pt:13.5,font:'A',type:'item'}],{printable_dots:576,raster:{dpi:203,protocol:'gs-v0'}});
+      if(image.length<100)throw new Error('Packaged raster fonts unavailable');
+      fs.writeFileSync(path.join(startupSmokeDirectory, "startup-proof.json"), JSON.stringify({ version: app.getVersion(), isPackaged: app.isPackaged, dependenciesLoaded: true, rasterFontsLoaded:true, userDataPath: app.getPath("userData"), bridgeStarted: false, rendererStarted: false }));
       app.quit();
       return;
     }

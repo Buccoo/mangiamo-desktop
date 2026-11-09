@@ -10,6 +10,7 @@ export interface TicketTextStyle {
   bold: boolean;
   align: TicketAlignment;
   space_after: 0 | 1 | 2;
+  size_pt?: number;
 }
 
 export type LineType = "header" | "table" | "timestamp" | "item" | "item_sub" | "separator" | "footer" | "blank";
@@ -25,6 +26,8 @@ export interface AnnotatedLine {
   block?: TicketBlock;
   cell_dots?: number;
   glyph_dots?: number;
+  size_pt?: number;
+  right_text?: string;
 }
 
 // ─── Kitchen layout ─────────────────────────────────────────────────────────
@@ -67,6 +70,7 @@ export interface KitchenLayoutConfig {
   block_order?: TicketBlock[];
   printer_profiles?: Record<string, 'custom-kube-ii'>;
   native_profile?: 'custom-kube-ii';
+  raster?: { dpi: 180 | 203 | 300; protocol: 'gs-v0' | 'esc-star' };
 }
 
 export const DEFAULT_KITCHEN_LAYOUT: KitchenLayoutConfig = {
@@ -125,6 +129,7 @@ export function normalizeKitchenLayout(raw: unknown): KitchenLayoutConfig {
     const style: Partial<TicketTextStyle> = {};
     if (value.font === 'A' || value.font === 'B') style.font = value.font;
     if (value.size === 'normal' || value.size === 'double') style.size = value.size;
+    if (typeof value.size_pt === 'number' && Number.isFinite(value.size_pt) && value.size_pt >= 4 && value.size_pt <= 72) style.size_pt = Math.round(value.size_pt * 10) / 10;
     if (typeof value.bold === 'boolean') style.bold = value.bold;
     if (value.align === 'left' || value.align === 'center' || value.align === 'right') style.align = value.align;
     if (value.space_after === 0 || value.space_after === 1 || value.space_after === 2) style.space_after = value.space_after;
@@ -133,6 +138,7 @@ export function normalizeKitchenLayout(raw: unknown): KitchenLayoutConfig {
   const rawOrder = r.block_order;
   const blockOrder = Array.isArray(rawOrder) ? [...new Set(rawOrder.filter((value): value is TicketBlock => TICKET_BLOCK_ORDER.includes(value as TicketBlock))), ...TICKET_BLOCK_ORDER.filter(value => !rawOrder.includes(value))] : undefined;
   const profiles: Record<string, 'custom-kube-ii'> = {};
+  const raster = r.raster && typeof r.raster === 'object' ? r.raster as Record<string, unknown> : null;
   if (r.printer_profiles && typeof r.printer_profiles === 'object' && !Array.isArray(r.printer_profiles)) {
     for (const [key, value] of Object.entries(r.printer_profiles).slice(0, 64)) {
       const port = Number(key.slice(key.lastIndexOf(':') + 1));
@@ -178,6 +184,7 @@ export function normalizeKitchenLayout(raw: unknown): KitchenLayoutConfig {
     ...(blockOrder ? { block_order: blockOrder } : {}),
     ...(Object.keys(profiles).length ? { printer_profiles: profiles } : {}),
     ...(r.native_profile === 'custom-kube-ii' ? { native_profile: 'custom-kube-ii' as const } : {}),
+    ...(raster ? { raster: { dpi: ([180,203,300].includes(Number(raster.dpi)) ? Number(raster.dpi) : 203) as 180 | 203 | 300, protocol: raster.protocol === 'esc-star' ? 'esc-star' as const : 'gs-v0' as const } } : {}),
   };
 }
 
@@ -192,6 +199,7 @@ export function resolveKitchenPrinterLayout(raw: unknown, host: string, port = 9
   if (layout.printer_profiles?.[printerProfileKey(host, port)] === 'custom-kube-ii') {
     layout.native_profile = 'custom-kube-ii';
     layout.printable_dots = Math.min(layout.printable_dots, 576) as KitchenLayoutConfig['printable_dots'];
+    if (layout.raster) layout.raster.dpi = 203;
   }
   return layout;
 }
@@ -342,6 +350,7 @@ export function renderKitchenTicketCore(
   const layout = normalizeKitchenLayout(options?.layout);
   const width = Math.min(layout.width, Math.floor(layout.printable_dots / ticketFontMetrics(layout, layout.font).cell));
   const sepChar = layout.separator_char;
+  const rasterMode = Object.values(layout.styles ?? {}).some(style => style?.size_pt != null);
 
   const items = Array.isArray(payload.items) ? payload.items : [];
   const department = normalizeDepartmentLabel(payload.department);
@@ -355,14 +364,14 @@ export function renderKitchenTicketCore(
   let block: TicketBlock = 'header';
   const addLine = (text: string, type: AnnotatedLine["type"], size: EscPosSize = "normal", bold = false, section: TicketSection = block, operational = false) => {
     const styled = type !== 'separator' && type !== 'blank';
-    const style = styled ? ticketSectionStyle(layout, section) : { font: layout.font, align: layout.align, size, bold, space_after: 0 };
+    const style: TicketTextStyle = styled ? ticketSectionStyle(layout, section) : { font: layout.font, align: layout.align, size, bold, space_after: 0 };
     // Service headings remain mandatory operational instructions, even with a hidden header.
     const effective = operational && !layout.styles?.header ? { ...style, size, bold } : style;
     const indent = type === 'item_sub' && effective.align === 'left' ? ' ' : '';
     const scale = effective.size === 'double' ? 2 : 1;
     const metric = ticketFontMetrics(layout, effective.font);
     const capacity = Math.min(Math.floor(width / scale), Math.floor(layout.printable_dots / (metric.cell * scale)));
-    for (const chunk of wrapTicketText(text, Math.max(1, capacity - indent.length))) lines.push({ text: indent + chunk, type, size: effective.size, bold: effective.bold, align: effective.align, font: effective.font, section, block, ...(layout.native_profile ? { cell_dots: metric.cell, glyph_dots: metric.glyph } : {}) });
+    for (const chunk of rasterMode ? [text] : wrapTicketText(text, Math.max(1, capacity - indent.length))) lines.push({ text: indent + chunk, type, size: effective.size, bold: effective.bold, align: effective.align, font: effective.font, section, block, ...(layout.native_profile ? { cell_dots: metric.cell, glyph_dots: metric.glyph } : {}), ...(rasterMode ? { size_pt: effective.size_pt ?? (effective.font === 'B' ? 9 : 12) * scale } : {}) });
     for (let i = 0; i < effective.space_after; i++) lines.push({ text: '', type: 'blank', size: 'normal', bold: false, align: effective.align, font: effective.font, section, block });
   };
   const addSep = (char = sepChar) => addLine(separator(char, width), "separator");

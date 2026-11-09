@@ -1,6 +1,6 @@
 {
   "name": "sushiamo-desktop",
-  "version": "1.5.53",
+  "version": "1.5.54",
   "private": true,
   "type": "module",
   "main": "electron-dist/main.cjs",
@@ -34,6 +34,7 @@
       "output": "dist-desktop"
     },
     "files": [
+      "assets/printing/**/*",
       "electron-dist/**/*",
       "package.json"
     ],
@@ -79,7 +80,8 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.94.0",
-    "electron-updater": "^6.7.3"
+    "electron-updater": "^6.7.3",
+    "opentype.js": "2.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.16.5",

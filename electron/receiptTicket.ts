@@ -29,6 +29,9 @@ export interface ReceiptLayoutConfig {
   separator_char: "-" | "=" | "*";
   width: 32 | 42 | 48 | 80;
   font: EscPosFont;
+  sizes_pt?: Partial<Record<'header'|'table'|'timestamp'|'items'|'total'|'footer',number>>;
+  printable_dots?: 360|384|512|576|960;
+  raster?: {dpi:180|203|300;protocol:'gs-v0'|'esc-star'};
 }
 
 export const DEFAULT_RECEIPT_LAYOUT: ReceiptLayoutConfig = {
@@ -72,8 +75,15 @@ export function normalizeReceiptLayout(raw: unknown): ReceiptLayoutConfig {
   const it = r.items && typeof r.items === "object" ? (r.items as Record<string, unknown>) : {};
   const tot = r.total && typeof r.total === "object" ? (r.total as Record<string, unknown>) : {};
   const ft = r.footer && typeof r.footer === "object" ? (r.footer as Record<string, unknown>) : {};
+  const sizes:NonNullable<ReceiptLayoutConfig['sizes_pt']>={};
+  const rawSizes=r.sizes_pt&&typeof r.sizes_pt==='object'?r.sizes_pt as Record<string,unknown>:{};
+  for(const key of ['header','table','timestamp','items','total','footer'] as const){const value=rawSizes[key];if(typeof value==='number'&&Number.isFinite(value)&&value>=4&&value<=72)sizes[key]=Math.round(value*10)/10;}
+  const raster=r.raster&&typeof r.raster==='object'?r.raster as Record<string,unknown>:null;
 
   return {
+    ...(Object.keys(sizes).length?{sizes_pt:sizes}:{}),
+    ...(r.printable_dots!=null||Object.keys(sizes).length?{printable_dots:([360,384,512,576,960].includes(Number(r.printable_dots))?Number(r.printable_dots):Number(r.width)===32?384:Number(r.width)===80?960:576) as 360|384|512|576|960}:{}),
+    ...(raster?{raster:{dpi:([180,203,300].includes(Number(raster.dpi))?Number(raster.dpi):203) as 180|203|300,protocol:raster.protocol==='esc-star'?'esc-star' as const:'gs-v0' as const}}:{}),
     header: {
       visible: h.visible !== false,
       show_restaurant_name: h.show_restaurant_name !== false,
@@ -108,6 +118,7 @@ export function normalizeReceiptLayout(raw: unknown): ReceiptLayoutConfig {
 
 function wrapReceiptLine(text: string, width: number): string[] {
   // Preserve amount-column spacing, but never pass printer control bytes.
+  // eslint-disable-next-line no-control-regex -- text must not inject ESC/POS commands.
   const safe = text.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
   const rows: string[] = [];
   let row = '', columns = 0;
@@ -216,8 +227,13 @@ export function renderNonFiscalReceiptTicket(
     : "Extra";
 
   const lines: AnnotatedLine[] = [];
-  const addLine = (text: string, type: AnnotatedLine["type"]) =>
-    { for (const chunk of wrapReceiptLine(text, width)) lines.push({ text: chunk, type, size: "normal", bold: false, align: "left" }); };
+  const rasterMode=Object.keys(layout.sizes_pt??{}).length>0;
+  const addLine = (text: string, type: AnnotatedLine["type"], pointSection?:keyof NonNullable<ReceiptLayoutConfig['sizes_pt']>,bold=false,right_text?:string) => {
+    const section=pointSection??(type==='header'||type==='table'||type==='timestamp'||type==='footer'?type:'items');
+    if(rasterMode){lines.push({text:text.trim(),type,size:'normal',bold,align:['header','table','timestamp','footer'].includes(section)?'center':'left',font:layout.font,size_pt:layout.sizes_pt?.[section]??(layout.font==='B'?9:12),right_text,section:section==='total'?'items':section});return;}
+    for (const chunk of wrapReceiptLine(text, width)) lines.push({ text: chunk, type, size: "normal", bold: false, align: "left" });
+  };
+  const addAmount=(label:string,value:string)=>addLine(rasterMode?label:padRow(label,value,width),'item','items',false,rasterMode?value:undefined);
   const addSep = (char?: string) => addLine((char ?? sepChar).repeat(width), "separator");
   const addBlank = () => addLine("", "blank");
 
@@ -249,24 +265,25 @@ export function renderNonFiscalReceiptTicket(
   // Items breakdown
   let hasItems = false;
   if (layout.items.show_ayce && ayceTotal > 0) {
-    addLine(padRow("AYCE", formatCurrency(ayceTotal), width), "item");
+    addAmount("AYCE", formatCurrency(ayceTotal));
     hasItems = true;
   }
   if (layout.items.show_extras && extrasTotal > 0) {
-    addLine(padRow(extrasLabel, formatCurrency(extrasTotal), width), "item");
+    addAmount(extrasLabel, formatCurrency(extrasTotal));
     hasItems = true;
   }
   if (layout.items.show_cover && coverTotal > 0) {
-    addLine(padRow("Coperto", formatCurrency(coverTotal), width), "item");
+    addAmount("Coperto", formatCurrency(coverTotal));
     hasItems = true;
   }
   if (hasItems) addSep();
 
   // Total
   if (layout.total.visible) {
-    lines.push({ text: padRow("TOTALE", formatCurrency(totalAmount), width), type: "item", size: "normal", bold: true });
+    if(rasterMode)addLine("TOTALE",'item','total',true,formatCurrency(totalAmount));
+    else lines.push({ text: padRow("TOTALE", formatCurrency(totalAmount), width), type: "item", size: "normal", bold: true });
     if (layout.total.show_payment_method) {
-      addLine(padRow("Pagamento", paymentLabel, width), "item");
+      addAmount("Pagamento", paymentLabel);
     }
     addSep("=");
   }
