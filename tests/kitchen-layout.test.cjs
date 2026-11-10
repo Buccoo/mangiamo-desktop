@@ -7,6 +7,29 @@ const { createRequire } = require('node:module');
 const { EventEmitter } = require('node:events');
 const core = require('../electron-dist/kitchenTicket.cjs');
 
+test('fast mode preserves dormant point sizes while selecting the native kitchen and receipt paths',async()=>{
+ const payload={restaurant_name:'Fixture',table_number:'5',items:[{name:'Sushi',quantity:2}],total_amount:25,route:{host:'fixture-only'}};
+ const layout=core.normalizeKitchenLayout({render_mode:'native',styles:{table:{size_pt:19.5},items:{size:'double',size_pt:13.5}}});
+ assert.equal(layout.render_mode,'native');assert.equal(layout.styles.table.size_pt,19.5);
+ const native=core.renderKitchenTicketCore(payload,{layout}).lines;
+ assert.ok(native.every(line=>line.size_pt==null));
+ assert.ok(native.some(line=>line.type==='item'&&line.size==='double'));
+ const precise=core.renderKitchenTicketCore(payload,{layout:{...layout,render_mode:'raster'}}).lines;
+ assert.ok(precise.some(line=>line.size_pt===19.5));
+ const receiptCore=require('../electron-dist/receiptTicket.cjs');
+ const receipt=receiptCore.normalizeReceiptLayout({render_mode:'native',sizes_pt:{total:22}});
+ assert.equal(receipt.render_mode,'native');assert.equal(receipt.sizes_pt.total,22);
+ assert.ok(receiptCore.renderNonFiscalReceiptTicket(payload,{layout:receipt}).lines.every(line=>line.size_pt==null));
+ assert.ok(receiptCore.renderNonFiscalReceiptTicket(payload,{layout:{...receipt,render_mode:'raster'}}).lines.some(line=>line.size_pt===22));
+ const bytes=await print({payload},receipt,'sendToNonFiscalReceiptPrinter');
+ assert.equal(bytes.indexOf(Buffer.from([29,118,48])),-1);
+});
+
+test('explicit custom mode renders default sizes even before editing a point input',()=>{
+ const lines=core.renderKitchenTicketCore({items:[{name:'Sushi',quantity:1}]},{layout:{render_mode:'raster'}}).lines;
+ assert.ok(lines.some(line=>line.size_pt!=null));
+});
+
 async function print(job, layout, method = 'sendToPrinter') {
   let bytes;
   class Socket extends EventEmitter {

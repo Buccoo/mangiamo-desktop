@@ -1,5 +1,9 @@
-import type { AnnotatedLine, EscPosFont } from './kitchenTicket';
+import type { AnnotatedLine, EscPosFont, TicketRenderMode } from './kitchenTicket';
+export function receiptUsesRaster(layout: Pick<ReceiptLayoutConfig, 'render_mode' | 'sizes_pt'>) {
+  return layout.render_mode === 'raster' || layout.render_mode !== 'native' && Object.keys(layout.sizes_pt ?? {}).length > 0;
+}
 export interface ReceiptLayoutConfig {
+  render_mode?: TicketRenderMode;
   header: {
     visible: boolean;
     show_restaurant_name: boolean;
@@ -81,8 +85,9 @@ export function normalizeReceiptLayout(raw: unknown): ReceiptLayoutConfig {
   const raster=r.raster&&typeof r.raster==='object'?r.raster as Record<string,unknown>:null;
 
   return {
+    ...(r.render_mode === 'native' || r.render_mode === 'raster' ? { render_mode: r.render_mode } : {}),
     ...(Object.keys(sizes).length?{sizes_pt:sizes}:{}),
-    ...(r.printable_dots!=null||Object.keys(sizes).length?{printable_dots:([360,384,512,576,960].includes(Number(r.printable_dots))?Number(r.printable_dots):Number(r.width)===32?384:Number(r.width)===80?960:576) as 360|384|512|576|960}:{}),
+    ...(r.printable_dots!=null||Object.keys(sizes).length||r.render_mode==='raster'?{printable_dots:([360,384,512,576,960].includes(Number(r.printable_dots))?Number(r.printable_dots):Number(r.width)===32?384:Number(r.width)===80?960:576) as 360|384|512|576|960}:{}),
     ...(raster?{raster:{dpi:([180,203,300].includes(Number(raster.dpi))?Number(raster.dpi):203) as 180|203|300,protocol:raster.protocol==='esc-star'?'esc-star' as const:'gs-v0' as const}}:{}),
     header: {
       visible: h.visible !== false,
@@ -227,7 +232,7 @@ export function renderNonFiscalReceiptTicket(
     : "Extra";
 
   const lines: AnnotatedLine[] = [];
-  const rasterMode=Object.keys(layout.sizes_pt??{}).length>0;
+  const rasterMode=receiptUsesRaster(layout);
   const addLine = (text: string, type: AnnotatedLine["type"], pointSection?:keyof NonNullable<ReceiptLayoutConfig['sizes_pt']>,bold=false,right_text?:string) => {
     const section=pointSection??(type==='header'||type==='table'||type==='timestamp'||type==='footer'?type:'items');
     if(rasterMode){lines.push({text:text.trim(),type,size:'normal',bold,align:['header','table','timestamp','footer'].includes(section)?'center':'left',font:layout.font,size_pt:layout.sizes_pt?.[section]??(layout.font==='B'?9:12),right_text,section:section==='total'?'items':section});return;}

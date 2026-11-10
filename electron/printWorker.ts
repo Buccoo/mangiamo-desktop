@@ -1421,7 +1421,7 @@ export class DesktopPrintWorker {
     const snapshot = (payload.layout ?? {}) as Record<string, unknown>;
     const layout = payload.layout_test === true ? snapshot.receipt : liveLayout;
     const normalized = (require("./receiptTicket.cjs") as typeof ReceiptTicket).normalizeReceiptLayout(layout);
-    if(normalized.sizes_pt){
+    if(normalized.render_mode==='raster'||normalized.render_mode!=='native'&&normalized.sizes_pt){
       const kitchen=payload.layout_test===true?snapshot.kitchen:liveKitchenLayout;
       const hardware=resolveKitchenPrinterLayout({...((kitchen&&typeof kitchen==='object')?kitchen:{}),printable_dots:normalized.printable_dots,raster:normalized.raster??{dpi:203,protocol:'gs-v0'}},host,port);
       normalized.printable_dots=hardware.printable_dots;normalized.raster=hardware.raster;

@@ -1,6 +1,11 @@
 export type TicketAlignment = "left" | "center" | "right";
 export type EscPosSize = "normal" | "double";
 export type EscPosFont = "A" | "B";
+export type TicketRenderMode = 'native' | 'raster';
+/** Missing mode preserves pre-selector layouts, including existing point sizes. */
+export function kitchenUsesRaster(layout: Pick<KitchenLayoutConfig, 'render_mode' | 'styles'>) {
+  return layout.render_mode === 'raster' || layout.render_mode !== 'native' && Object.values(layout.styles ?? {}).some(style => style?.size_pt != null);
+}
 export type TicketSection = "header" | "table" | "items" | "notes" | "guest" | "timestamp" | "footer";
 export type TicketBlock = "header" | "table" | "items" | "timestamp" | "footer";
 export const TICKET_BLOCK_ORDER: TicketBlock[] = ["header", "table", "items", "timestamp", "footer"];
@@ -33,6 +38,7 @@ export interface AnnotatedLine {
 // ─── Kitchen layout ─────────────────────────────────────────────────────────
 
 export interface KitchenLayoutConfig {
+  render_mode?: TicketRenderMode;
   align: TicketAlignment;
   header: {
     visible: boolean;
@@ -147,6 +153,7 @@ export function normalizeKitchenLayout(raw: unknown): KitchenLayoutConfig {
   }
 
   return {
+    ...(r.render_mode === 'native' || r.render_mode === 'raster' ? { render_mode: r.render_mode } : {}),
     align: r.align === "left" || r.align === "right" ? r.align : "center",
     header: {
       visible: h.visible !== false,
@@ -350,7 +357,7 @@ export function renderKitchenTicketCore(
   const layout = normalizeKitchenLayout(options?.layout);
   const width = Math.min(layout.width, Math.floor(layout.printable_dots / ticketFontMetrics(layout, layout.font).cell));
   const sepChar = layout.separator_char;
-  const rasterMode = Object.values(layout.styles ?? {}).some(style => style?.size_pt != null);
+  const rasterMode = kitchenUsesRaster(layout);
 
   const items = Array.isArray(payload.items) ? payload.items : [];
   const department = normalizeDepartmentLabel(payload.department);

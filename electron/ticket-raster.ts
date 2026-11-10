@@ -193,7 +193,9 @@ export function encodeRasterTicket(image:RasterImage, protocol:'gs-v0'|'esc-star
   if (!['gs-v0','esc-star'].includes(protocol)) throw Error('TICKET_GRAPHICS_UNSUPPORTED');
   const stride=Math.ceil(image.width/8), result:number[]=[27,64];
   if(protocol==='gs-v0') {
-    const band=Math.max(1,Math.min(24,Math.floor(4096/stride)));
+    // Each GS-v0 command prints and feeds its own image. Group rows to reduce
+    // repeated firmware print/feed cycles while bounding each image to 32 KiB.
+    const band=Math.max(1,Math.min(256,Math.floor(32768/stride)));
     for(let y=0;y<image.height;y+=band){const count=Math.min(band,image.height-y);result.push(29,118,48,0,stride&255,stride>>8,count&255,count>>8);for(let i=y*stride;i<(y+count)*stride;i++)result.push(image.data[i]);}
   } else {
     const dpi=image.dpi??203;

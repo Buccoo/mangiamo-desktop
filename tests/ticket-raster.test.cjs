@@ -45,13 +45,23 @@ test('bounds invalid sizes and resources and rejects unsupported glyphs before d
   assert.throws(() => raster.renderRasterTicket([row('x'.repeat(70000),12)],{width:576,dpi:203}));
   assert.throws(() => raster.renderRasterTicket([row('\u{10ffff}',12)],{width:576,dpi:203}), /GLYPH_UNSUPPORTED/);
 });
-test('GS-v0 image bands reconstruct the source pixels with no scaling and stay within small printer buffers', () => {
+test('GS-v0 image bands reconstruct the source pixels with no scaling and stay bounded', () => {
   const image = raster.renderRasterTicket([row('Sushi Assortito',24)], {width:576,dpi:203});
   const bytes = raster.encodeRasterTicket(image,'gs-v0');
   let offset=2, chunks=[];
-  while(bytes[offset]===29 && bytes[offset+1]===118) { assert.equal(bytes[offset+3],0); const stride=bytes[offset+4]+256*bytes[offset+5], height=bytes[offset+6]+256*bytes[offset+7]; assert.ok(stride*height<=4096); chunks.push(bytes.slice(offset+8,offset+8+stride*height)); offset+=8+stride*height; }
+  while(bytes[offset]===29 && bytes[offset+1]===118) { assert.equal(bytes[offset+3],0); const stride=bytes[offset+4]+256*bytes[offset+5], height=bytes[offset+6]+256*bytes[offset+7]; assert.ok(stride*height<=32768); chunks.push(bytes.slice(offset+8,offset+8+stride*height)); offset+=8+stride*height; }
   assert.deepEqual(Buffer.concat(chunks.map(Buffer.from)),Buffer.from(image.data));
   assert.throws(() => raster.encodeRasterTicket(image,'invented'), /GRAPHICS_UNSUPPORTED/);
+});
+
+test('standard graphics groups a typical ticket into three print commands without changing any pixels', () => {
+  const width=576,height=696,data=Uint8Array.from({length:width/8*height},(_,i)=>(i*37)&255);
+  const bytes=raster.encodeRasterTicket({width,height,data,dpi:203},'gs-v0');
+  let offset=2;const parts=[];
+  while(bytes[offset]===29&&bytes[offset+1]===118){const stride=bytes[offset+4]+256*bytes[offset+5],rows=bytes[offset+6]+256*bytes[offset+7];parts.push(bytes.slice(offset+8,offset+8+stride*rows));offset+=8+stride*rows;}
+  assert.equal(parts.length,3,'avoid restarting graphic printing every 24 dots');
+  assert.ok(Buffer.concat(parts.map(Buffer.from)).equals(Buffer.from(data)));
+  assert.deepEqual(Array.from(bytes.slice(offset)),[29,86,0]);
 });
 test('ESC-star column bands reconstruct the same complete pixel matrix without an alternate send',()=>{
  const image=raster.renderRasterTicket([row('Compatibilità 13,5 pt',13.5)],{width:384,dpi:203});
