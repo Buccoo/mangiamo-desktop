@@ -106,9 +106,29 @@ const desktopUpdateActions = createDesktopUpdateActions({
   onError: (error) => {
     const message = error instanceof Error ? error.message : String(error);
     log("ERROR", "desktop update installation failed", message);
+    printWorker?.resumeAfterUpdate();
     emitDesktopUpdateEvent({ type: "error", data: { message } });
   },
 });
+
+let desktopInstallPreparation: Promise<{ ok: boolean; reason?: string; error?: string }> | null = null;
+function installDesktopUpdateSafely() {
+  if (desktopInstallPreparation) return desktopInstallPreparation;
+  if (!desktopAutoUpdateEnabled || !desktopUpdateDownloaded) return Promise.resolve(desktopUpdateActions.install());
+  const worker = printWorker;
+  desktopInstallPreparation = (async () => {
+    try {
+      await worker?.prepareForUpdate();
+      const result = desktopUpdateActions.install();
+      if (!result.ok) worker?.resumeAfterUpdate();
+      return result;
+    } catch (error) {
+      worker?.resumeAfterUpdate();
+      return { ok: false, error: error && typeof error === 'object' && 'message' in error ? String(error.message) : String(error) };
+    }
+  })().finally(() => { desktopInstallPreparation = null; });
+  return desktopInstallPreparation;
+}
 
 async function detectDesktopPrinterPaper(config: { host?: string; port?: number } = {}) {
   if (printWorker?.getPublicState().service.processing) return { ok: false as const, reason: "PRINT_JOBS_ACTIVE" };
@@ -561,7 +581,7 @@ async function downloadFallbackInstallerAsset() {
 async function installFallbackInstallerAsset() {
   if (process.platform === "win32") {
     if (!desktopAutoUpdateEnabled) return { ok: false, reason: "UPDATER_DISABLED" };
-    return desktopUpdateActions.install();
+    return installDesktopUpdateSafely();
   }
   const installerPath = fallbackInstallerDownloadedPath;
   if (!installerPath) {
@@ -1449,7 +1469,7 @@ app
         available: desktopUpdateAvailable,
         downloaded: desktopUpdateDownloaded,
         downloading: desktopUpdateActions.downloading,
-        installing: desktopUpdateActions.installing,
+        installing: Boolean(desktopInstallPreparation) || desktopUpdateActions.installing,
         currentVersion: app.getVersion(),
         updateInfo: desktopUpdateInfo || null,
       };
@@ -1470,7 +1490,7 @@ app
           reason: app.isPackaged ? "DISABLED_BY_CONFIG" : "NOT_PACKAGED",
         };
       }
-      return desktopUpdateActions.install();
+      return installDesktopUpdateSafely();
     });
     ipcMain.handle("desktop:download-installer-fallback", async () => {
       return downloadFallbackInstallerAsset();

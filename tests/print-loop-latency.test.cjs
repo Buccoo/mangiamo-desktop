@@ -156,3 +156,23 @@ test('receipt acknowledgement loss never resends the document during recovery', 
   assert.equal(state.acknowledgements, 2);
   assert.equal((await worker.deliveryJournal.list()).length, 0);
 });
+
+
+test('update pause drains the current send and acknowledgement without changing its generation or claiming more work', async t => {
+  const { worker,state,calls,timers }=fixture(t,[[{id:'one',department:'cucina'}]]);
+  let release;
+  worker.sendToPrinter=async()=>{state.sends++;await new Promise(resolve=>{release=resolve;});};
+  const generation=worker.serviceStartGeneration;
+  const tick=worker.runTick();
+  while(!release)await new Promise(resolve=>setImmediate(resolve));
+  const paused=worker.prepareForUpdate();
+  const claims=calls.length;
+  await worker.runTick();assert.equal(calls.length,claims);
+  assert.equal(worker.serviceStartGeneration,generation);assert.equal(state.acknowledgements,0);
+  release();await tick;await paused;
+  assert.equal(state.sends,1);assert.equal(state.acknowledgements,1);
+  assert.equal(worker.service.processing,false);assert.equal(worker.service.running,true);
+  assert.equal(timers.length,1,'only the drain deadline, no next polling timer');
+  worker.service.running=false;
+  worker.resumeAfterUpdate();assert.equal(worker.updatePaused,false);assert.equal(worker.service.running,false);
+});

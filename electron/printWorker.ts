@@ -819,6 +819,8 @@ export class DesktopPrintWorker {
   private nonFiscalReceiptRpcAvailable = true;
   private fiscalReceiptRpcAvailable = true;
   private boundWindow: BrowserWindow | null = null;
+  private updatePaused = false;
+  private readonly updateIdleWaiters = new Set<() => void>();
   private service = {
     running: false,
     processing: false,
@@ -961,6 +963,25 @@ export class DesktopPrintWorker {
     this.broadcastState();
     void this.runTick();
     return this.getPublicState();
+  }
+
+  /** Drain the current claim/send/ack cycle without invalidating its generation.
+   * Pausing polling first closes the race between the idle check and quit. */
+  async prepareForUpdate(timeoutMs = 60000): Promise<void> {
+    this.updatePaused = true;
+    if (this.service.timer) { clearTimeout(this.service.timer); this.service.timer = null; }
+    if (!this.service.processing) return;
+    await new Promise<void>((resolve, reject) => {
+      const ready = () => { clearTimeout(timer); this.updateIdleWaiters.delete(ready); resolve(); };
+      const timer = setTimeout(() => { this.updateIdleWaiters.delete(ready); reject(new Error('PRINT_JOBS_ACTIVE')); }, timeoutMs);
+      this.updateIdleWaiters.add(ready);
+    });
+  }
+
+  resumeAfterUpdate() {
+    if (!this.updatePaused) return;
+    this.updatePaused = false;
+    if (this.service.running && !this.service.processing) void this.runTick();
   }
 
   async stopService() {
@@ -1472,7 +1493,7 @@ export class DesktopPrintWorker {
   }
 
   private async runTick() {
-    if (!this.service.running || this.service.processing) return;
+    if (!this.service.running || this.service.processing || this.updatePaused) return;
     if (this.service.timer) clearTimeout(this.service.timer);
     this.service.timer = null;
     const tickStartedAt = Date.now();
@@ -1698,8 +1719,9 @@ export class DesktopPrintWorker {
       this.pushLog("ERROR", `Tick error: ${message}`);
     } finally {
       this.service.processing = false;
+      for (const ready of this.updateIdleWaiters) ready();
       this.broadcastState();
-      if (this.service.running) {
+      if (this.service.running && !this.updatePaused) {
         const delay = tickFailed ? this.config.pollMs : didWork ? 0 : Math.max(0, this.config.pollMs - (Date.now() - tickStartedAt));
         this.service.timer = setTimeout(() => {
           void this.runTick();

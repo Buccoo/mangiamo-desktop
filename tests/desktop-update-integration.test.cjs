@@ -42,7 +42,7 @@ function mainUpdater({ enabled = true } = {}) {
   };
   vm.runInNewContext(main.slice(0, boundary) + `
     module.exports = { setupAutoUpdaterScaffold, checkForUpdatesWithFeedFallback,
-      downloadFallbackInstallerAsset, installFallbackInstallerAsset,
+      downloadFallbackInstallerAsset, installFallbackInstallerAsset, installDesktopUpdateSafely,
       setWorker: worker => { printWorker = worker; },
       detectDesktopPrinterPaper: typeof detectDesktopPrinterPaper === "undefined" ? null : detectDesktopPrinterPaper, desktopUpdateActions: typeof desktopUpdateActions === "undefined" ? null : desktopUpdateActions };
   `, context);
@@ -186,4 +186,34 @@ test('late availability events cannot invalidate verified download or installati
   assert.equal(calls.scheduled.length, 1);
   calls.scheduled[0]();
   assert.deepEqual(calls.installs, [[true, true]]);
+});
+
+
+test('installation drains an active polling cycle once, then keeps it paused through restart', async () => {
+  const { api, updater, calls } = mainUpdater();
+  let finish, busy=true, pauses=0;
+  api.setWorker({getPublicState:()=>({service:{processing:busy}}),prepareForUpdate:()=>{pauses++;return new Promise(resolve=>{finish=()=>{busy=false;resolve();};});},resumeAfterUpdate:()=>assert.fail('must not resume before successful quit')});
+  updater.emit('update-downloaded',{version:'99.0.0'});
+  const first=api.installDesktopUpdateSafely();const second=api.installDesktopUpdateSafely();
+  assert.equal(pauses,1);assert.equal(calls.installs.length,0);
+  finish();assert.equal((await first).ok,true);assert.equal((await second).ok,true);
+  assert.equal(calls.scheduled.length,1);calls.scheduled[0]();
+  assert.deepEqual(calls.installs,[[true,true]]);
+});
+test('drain timeout resumes polling and allows an explicit installation retry', async () => {
+  const { api, updater, calls }=mainUpdater();let resumes=0;
+  api.setWorker({getPublicState:()=>({service:{processing:true}}),prepareForUpdate:async()=>{throw Error('PRINT_JOBS_ACTIVE');},resumeAfterUpdate:()=>resumes++});
+  updater.emit('update-downloaded',{version:'99.0.0'});
+  assert.equal((await api.installDesktopUpdateSafely()).error,'PRINT_JOBS_ACTIVE');
+  assert.equal(resumes,1);assert.equal(calls.scheduled.length,0);
+});
+
+
+test('native installer failure resumes the paused worker instead of leaving printing suspended', async () => {
+ const {api,updater,calls}=mainUpdater();let resumes=0;
+ api.setWorker({getPublicState:()=>({service:{processing:false}}),prepareForUpdate:async()=>{},resumeAfterUpdate:()=>resumes++});
+ updater.quitAndInstall=()=>{throw Error('installer failed');};
+ updater.emit('update-downloaded',{version:'99.0.0'});
+ assert.equal((await api.installDesktopUpdateSafely()).ok,true);
+ calls.scheduled[0]();assert.equal(resumes,1);
 });
