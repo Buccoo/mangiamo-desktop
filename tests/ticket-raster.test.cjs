@@ -87,3 +87,26 @@ test('large leading and trailing glyph bearings keep every outline inside both p
   for(let y=0;y<image.height;y++)for(const x of [0,1,2,3,4,5,6,7,376,377,378,379,380,381,382,383])assert.equal(Boolean(image.data[y*stride+(x>>3)]&(128>>(x&7))),false,`${text} ${align} overhang at ${x},${y}`);
  }
 });
+
+
+test('Umaiya native mixed Chinese/Italian ticket dispatches graphic bytes with readable rows, grouping and notes', () => {
+  const core = require('../electron-dist/kitchenTicket.cjs');
+  const { buildPreciseTicket } = require('../electron-dist/ticketFonts.cjs');
+  const layout = { render_mode: 'native', printable_dots: 576, native_profile: 'custom-kube-ii',
+    header: { visible: false }, footer: { visible: false },
+    items: { show_guest_name: false }, styles: { items: { font: 'A', size_pt: 16 }, notes: { size_pt: 12 } } };
+  const name = 'SPAGHETTI DI SOIA CON GAMBERI 虾仁粉丝';
+  const items = [1, 2].map(quantity => ({ menu_item_id: 'dish', item_number: 62, name, quantity, notes: 'No uova' }));
+  const { lines } = core.renderKitchenTicketCore({ table_number: '4', items }, { layout });
+  assert.equal(lines.filter(line => line.type === 'item').length, 1);
+  assert.equal(lines.find(line => line.type === 'item').text, `3x #62 ${name}`);
+  assert.ok(lines.some(line => line.size_pt != null), 'printWorker selects buildPreciseTicket');
+  const image = raster.renderRasterTicket(lines, { width: 576, dpi: 203 });
+  assert.equal(image.rows.filter(row => row.type === 'item').map(row => row.text).join(' ').replace(/\s/g, ''), `3x#62${name}`.replace(/\s/g, ''));
+  assert.ok(image.rows.every(row => row.inkWidth <= 560));
+  for (let i=1;i<image.rows.length;i++) assert.ok(image.rows[i].y >= image.rows[i-1].y + image.rows[i-1].height);
+  const bytes = buildPreciseTicket(lines, layout);
+  assert.deepEqual([...bytes.subarray(0, 6)], [27,64,29,118,48,0]);
+  assert.equal(image.rows.filter(row => row.type === 'separator').length, 1);
+  assert.ok(image.rows.some(row => row.text.includes('No uova')));
+});

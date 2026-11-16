@@ -130,9 +130,9 @@ test('ordinary orders use the live layout rather than an obsolete payload snapsh
   const bytes = await print({ payload: { ...sample, layout: { kitchen: { font: 'B' } } } }, live);
   assert.deepEqual(bytes, Buffer.from(core.buildKitchenEscPos(core.renderKitchenTicketCore(sample, { layout: live }).lines, live)));
 });
-test('long text, controls and CJK stay within selected columns, including 2x rows', () => {
+test('long native text and controls stay within selected columns, including 2x rows', () => {
   for (const width of [32, 42, 48, 80]) {
-    const result = core.renderKitchenTicketCore({ ...sample, items: [{ name: '三文鱼寿司拼盘'.repeat(12) + '\x1b@\x1dV0', quantity: 12, notes: 'N'.repeat(150) }] }, { layout: { width, items: { size: 'double' } } });
+    const result = core.renderKitchenTicketCore({ ...sample, items: [{ name: 'SUSHIASSORTITO'.repeat(12) + '\x1b@\x1dV0', quantity: 12, notes: 'N'.repeat(150) }] }, { layout: { width, items: { size: 'double' } } });
     for (const line of result.lines) {
       assert.ok(core.ticketTextColumns(line.text) <= width / (line.size === 'double' ? 2 : 1));
       assert.doesNotMatch(line.text, /[\x00-\x1f]/);
@@ -192,4 +192,15 @@ test('180dpi 58mm heads use finite 30-column A geometry', () => {
   assert.equal(layout.printable_dots, 360);
   for (const line of core.renderKitchenTicketCore(sample, { layout }).lines)
     assert.ok(core.ticketTextColumns(line.text) * (line.font === 'B' ? 9 : 12) * (line.size === 'double' ? 2 : 1) <= 360);
+});
+
+
+test('actual native-selected kitchen transport sends mixed Chinese text as bundled-font graphics', async () => {
+  const fonts = require('../electron-dist/ticketFonts.cjs');
+  const payload = { ...sample, items: [{ name: 'SPAGHETTI DI SOIA CON GAMBERI 虾仁粉丝', quantity: 1, item_number: 62, notes: 'No uova' }] };
+  const layout = { render_mode: 'native', printable_dots: 576, styles: { items: { size_pt: 16 } } };
+  const lines = core.renderKitchenTicketCore(payload, { layout }).lines;
+  const bytes = await print({ payload }, layout);
+  assert.deepEqual(bytes, fonts.buildPreciseTicket(lines, layout));
+  assert.ok(bytes.includes(Buffer.from([29,118,48,0])));
 });

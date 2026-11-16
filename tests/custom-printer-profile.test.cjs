@@ -71,3 +71,10 @@ test('rules only separate nonempty reordered blocks and leave room before the na
     assert.equal(line.size,'normal');assert.ok(core.ticketTextColumns(line.text)*12<576);
   }
 });
+
+
+test('native line feeds explicitly use physical dots before setting spacing', () => {
+  const bytes = Buffer.from(core.buildKitchenEscPos([{ text: 'Spaghetti', type: 'item', font: 'B', size: 'double', bold: false }], core.resolveKitchenPrinterLayout(raw, '192.168.68.101')));
+  assert.deepEqual([...bytes.subarray(0, 6)], [27,64,29,80,203,203]);
+  assert.ok(bytes.includes(Buffer.from([27,51,56])));
+});

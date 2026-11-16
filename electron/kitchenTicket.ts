@@ -522,6 +522,13 @@ export function renderKitchenTicketCore(
     previousBlock = currentBlock;
   }
   lines = ordered;
+  // Native firmware code pages cannot safely interpret UTF-8. Re-render the
+  // original fields before wrapping so Unicode names/notes keep their glyphs
+  // and use the same bundled-font image in preview and on the printer.
+  // eslint-disable-next-line no-control-regex -- ASCII is the only portable native encoding.
+  if (!rasterMode && lines.some(line => /[^\x20-\x7e]/u.test(line.text))) {
+    return renderKitchenTicketCore(payload, { ...options, layout: { ...layout, render_mode: 'raster' } });
+  }
   const text = lines.map((l) => l.text).join("\n");
   const htmlLines = lines
     .map((l) => {
@@ -547,7 +554,9 @@ export function buildKitchenEscPos(lines: AnnotatedLine[], rawLayout?: unknown):
   // Use the same fixed cell geometry as the preview. The printer must support
   // this printable width; 80 columns is intended for wide-format hardware.
   const dots = layout.printable_dots;
-  const bytes: number[] = [27, 64, 27, 77, layout.font === 'A' ? 0 : 1, 27, 32, 0,
+  // ESC 3 uses the configured motion unit, which may be half a dot after a
+  // firmware reset. Set one 203-dpi dot before positioning or line spacing.
+  const bytes: number[] = [27, 64, 29, 80, 203, 203, 27, 77, layout.font === 'A' ? 0 : 1, 27, 32, 0,
     29, 76, 0, 0, 29, 87, dots & 255, dots >> 8];
   // CUSTOM DOMC-0006I: explicitly choose A=15 / B=20 CPI for this ticket.
   if (layout.native_profile === 'custom-kube-ii') bytes.push(27, 193, 1);
