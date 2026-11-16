@@ -215,6 +215,7 @@ jobs:
           cd mangiamo-desktop
           npm version "$RELEASE_VERSION" --no-git-tag-version --ignore-scripts --allow-same-version
           cd ..
+          gh auth setup-git
           gh repo clone Buccoo/mangiamo-manager repo-clone
           cd repo-clone
           git checkout main

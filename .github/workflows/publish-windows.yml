@@ -46,7 +46,9 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          gh release create "v$VERSION" --target "$GITHUB_SHA" --title "Mangiamo Desktop $VERSION — Windows" --notes "Windows update: kitchen item wrapping, conditional dividers and consolidated dish quantities. Mac remains on its previous version." --draft
+          if ! gh release view "v$VERSION" >/dev/null 2>&1; then
+            gh release create "v$VERSION" --target "$GITHUB_SHA" --title "Mangiamo Desktop $VERSION — Windows" --notes "Windows update: kitchen item wrapping, conditional dividers and consolidated dish quantities. Mac remains on its previous version." --draft
+          fi
           gh release upload "v$VERSION" dist-desktop/* --clobber
           gh release edit "v$VERSION" --draft=false --latest
       - name: Publish Windows updater feed
@@ -57,6 +59,7 @@ jobs:
         run: |
           set -euo pipefail
           cd ..
+          gh auth setup-git
           gh repo clone Buccoo/mangiamo-manager repo-clone
           cd repo-clone
           git checkout main

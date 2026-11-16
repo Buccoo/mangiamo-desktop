@@ -48,3 +48,12 @@ test('existing Windows artifacts require successful source build, unchanged code
  assert.ok(publish.indexOf('--draft')<publish.indexOf('gh release upload'));
  assert.ok(publish.indexOf('gh release upload')<publish.indexOf('gh release edit'));
 });
+
+test('feed publication configures Git credentials for authenticated pull and push',()=>{
+ const reuse=yaml.load(fs.readFileSync(path.join(__dirname,'../.github/workflows/publish-windows.yml'),'utf8'));
+ for(const steps of [reuse.jobs['publish-windows'].steps,workflow.jobs['update-feed'].steps]) {
+  const run=steps.find(step=>step.run?.includes('publish-desktop-updater.mjs')).run;
+  assert.ok(run.indexOf('gh auth setup-git')>=0);
+  assert.ok(run.indexOf('gh auth setup-git')<run.indexOf('git pull'));
+ }
+});
