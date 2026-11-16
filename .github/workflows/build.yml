@@ -7,10 +7,10 @@ on:
   workflow_dispatch:
     inputs:
       platform:
-        description: Single-platform runs build artifacts only; public releases require all
+        description: Release platform (Windows by default; Mac is paused)
         type: choice
         required: true
-        default: all
+        default: windows
         options:
           - all
           - windows
@@ -77,7 +77,7 @@ jobs:
             dist-desktop/*.blockmap
 
   build-mac:
-    if: github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'mac'
+    if: github.event_name == 'workflow_dispatch' && (inputs.platform == 'all' || inputs.platform == 'mac')
     runs-on: macos-latest
     steps:
       - name: Checkout mangiamo-desktop
@@ -152,9 +152,10 @@ jobs:
   release:
     needs: [build-windows, build-mac]
     runs-on: ubuntu-latest
-    # Single-platform dispatch uploads artifacts only. Public releases retain
-    # the existing requirement that both Windows and macOS builds succeed.
-    if: startsWith(github.ref, 'refs/tags/') && needs.build-windows.result == 'success' && needs.build-mac.result == 'success'
+    # Windows can release independently while Mac is paused.
+    if: always() && needs.build-windows.result == 'success' && (needs.build-mac.result == 'success' || needs.build-mac.result == 'skipped') && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch')
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -165,21 +166,31 @@ jobs:
           merge-multiple: true
           path: artifacts
 
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then VERSION="${GITHUB_REF_NAME#v}"; fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
       - name: Require matching packaged startup proof before publication
-        run: node scripts/desktop/verify-release-artifacts.cjs artifacts "${{ github.ref_name }}"
+        run: node scripts/desktop/verify-release-artifacts.cjs artifacts "${{ steps.version.outputs.version }}"
 
       - name: List artifacts
         run: ls -la artifacts/
 
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ steps.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
           files: artifacts/**/*
           generate_release_notes: true
 
   update-feed:
     needs: [release]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') && needs.release.result == 'success'
+    if: always() && needs.release.result == 'success'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -198,21 +209,22 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.SUSHIAMO_PROD_TOKEN }}
           PUBLIC_APP_URL: https://manager.mangiamo.app
+          RELEASE_VERSION: ${{ needs.release.outputs.version }}
         run: |
           set -euo pipefail
           cd mangiamo-desktop
-          npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version --ignore-scripts --allow-same-version
+          npm version "$RELEASE_VERSION" --no-git-tag-version --ignore-scripts --allow-same-version
           cd ..
           gh repo clone Buccoo/mangiamo-manager repo-clone
           cd repo-clone
           git checkout main
           git fetch origin --prune --tags
           git pull --ff-only
-          node ../mangiamo-desktop/scripts/desktop/verify-release-artifacts.cjs ../mangiamo-desktop/dist-desktop "${GITHUB_REF_NAME}"
+          node ../mangiamo-desktop/scripts/desktop/verify-release-artifacts.cjs ../mangiamo-desktop/dist-desktop "$RELEASE_VERSION"
           node scripts/print/publish-desktop-build.mjs --platform win
           node scripts/print/publish-desktop-updater.mjs
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
           git add public/downloads/latest.yml public/downloads/Mangiamo-Desktop-Setup.exe public/downloads/Mangiamo-Desktop-Setup.exe.blockmap public/downloads/SushiAMO-Desktop-Setup.exe.blockmap public/downloads/printer-updates/windows/latest.json
-          git diff --cached --quiet || git commit -m "chore: update desktop latest.yml to ${GITHUB_REF_NAME}"
+          git diff --cached --quiet || git commit -m "chore: update desktop latest.yml to ${RELEASE_VERSION}"
           git push
