@@ -3,7 +3,7 @@ import * as opentype from 'opentype.js';
 type Command = { type: string; x?: number; y?: number; x1?: number; y1?: number; x2?: number; y2?: number };
 type Glyph = { index: number; advanceWidth: number; getPath(x: number, y: number, size: number): { commands: Command[] }; getBoundingBox():{x1:number;y1:number;x2:number;y2:number} };
 type VectorFont = { unitsPerEm: number; ascender: number; descender: number; charToGlyph(char: string): Glyph; getKerningValue(left: Glyph, right: Glyph): number };
-export type RasterLine = { text: string; right_text?: string; type?: string; size?: string; size_pt?: number; bold?: boolean; font?: string; align?: string; section?: string; block?: string };
+export type RasterLine = { text: string; right_text?: string; right_size_pt?: number; type?: string; size?: string; size_pt?: number; bold?: boolean; font?: string; align?: string; section?: string; block?: string };
 export type RasterImage = { width: number; height: number; data: Uint8Array; dpi?:number };
 export type RasterRow = RasterLine & RasterImage & { y: number; inkWidth: number };
 export type RasterTicket = RasterImage & { rows: RasterRow[]; dpi: number };
@@ -126,7 +126,7 @@ export function renderRasterTicket(input: RasterLine[], options: { width: number
     // eslint-disable-next-line no-control-regex, no-misleading-character-class -- strip printer controls and invisible direction/variation modifiers before glyph lookup.
     const text = source.text.normalize('NFC').replace(/\t/g, '    ').replace(/\r\n?/g, '\n').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufe0e\ufe0f]/g, '');
     const pixels = pointsToDots(effectivePointSize(source), dpi), compact = source.font === 'B' ? .82 : 1, bold = source.bold === true;
-    const right = source.right_text ?? '', rightWidth = measure(right,pixels,compact,bold);
+    const right = source.right_text ?? '', rightPixels = pointsToDots(source.right_size_pt ?? effectivePointSize(source), dpi), rightWidth = measure(right,rightPixels,compact,bold);
     if (rightWidth > width-24) throw Error('TICKET_GLYPH_TOO_WIDE');
     const chunks = source.type === 'separator' || source.type === 'blank' ? [''] : wrap(text, width-16-(right?rightWidth+8:0), pixels, compact, bold);
     for (const [chunkIndex,chunk] of chunks.entries()) {
@@ -140,13 +140,13 @@ export function renderRasterTicket(input: RasterLine[], options: { width: number
         const center = Math.floor(height/2);
         for (const ruleY of source.text.startsWith('=') ? [center-2,center+2] : [center]) for (let x=8;x<width-8;x++) image.data[ruleY*stride+(x>>3)] |= 128>>(x&7);
       } else {
-        const paint = (text:string,start:number) => {
+        const paint = (text:string,start:number,paintPixels = pixels) => {
         let x = start;
         let previous: ReturnType<typeof glyphFor> | undefined;
         for (const char of text) {
-          const next = glyphFor(char,bold), scale = pixels/next.font.unitsPerEm*compact;
+          const next = glyphFor(char,bold), scale = paintPixels/next.font.unitsPerEm*compact;
           if (previous?.font === next.font) x += next.font.getKerningValue(previous.glyph,next.glyph)*scale;
-          const edges = pathEdges(next.glyph.getPath(x,2+ascent,pixels).commands,x,compact);
+          const edges = pathEdges(next.glyph.getPath(x,2+ascent,paintPixels).commands,x,compact);
           fillEdges(image,edges);
           // The CJK fallback is regular; a deterministic one-dot expansion adds emphasis.
           if (bold && next.font === fonts.get('cjk')) fillEdges(image,edges.map(([x0,y0,x1,y1])=>[x0+1,y0,x1+1,y1]));
@@ -155,7 +155,7 @@ export function renderRasterTicket(input: RasterLine[], options: { width: number
         };
         const bounds=textBounds(chunk,pixels,compact,bold);
         paint(chunk,(right?8:source.align === 'right' ? width-8-image.inkWidth : source.align === 'center' ? (width-image.inkWidth)/2 : 8)-bounds.min);
-        if(rightText){const rightBounds=textBounds(rightText,pixels,compact,bold);paint(rightText,width-8-rightBounds.max);}
+        if(rightText){const rightBounds=textBounds(rightText,rightPixels,compact,bold);paint(rightText,width-8-rightBounds.max,rightPixels);}
       }
       rows.push(image); y+=height;
     }

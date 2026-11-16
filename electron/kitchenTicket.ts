@@ -33,6 +33,7 @@ export interface AnnotatedLine {
   glyph_dots?: number;
   size_pt?: number;
   right_text?: string;
+  right_size_pt?: number;
 }
 
 // ─── Kitchen layout ─────────────────────────────────────────────────────────
@@ -52,6 +53,7 @@ export interface KitchenLayoutConfig {
     size: EscPosSize;
     bold: boolean;
     label: string;
+    show_covers: boolean;
   };
   items: {
     visible: boolean;
@@ -61,6 +63,7 @@ export interface KitchenLayoutConfig {
     show_quantity: boolean;
     show_guest_name: boolean;
     show_notes: boolean;
+    group_by_category: boolean;
   };
   footer: {
     visible: boolean;
@@ -93,6 +96,7 @@ export const DEFAULT_KITCHEN_LAYOUT: KitchenLayoutConfig = {
     size: "double",
     bold: true,
     label: "Tavolo",
+    show_covers: true,
   },
   items: {
     visible: true,
@@ -102,6 +106,7 @@ export const DEFAULT_KITCHEN_LAYOUT: KitchenLayoutConfig = {
     show_quantity: true,
     show_guest_name: true,
     show_notes: true,
+    group_by_category: true,
   },
   footer: {
     visible: true,
@@ -164,6 +169,7 @@ export function normalizeKitchenLayout(raw: unknown): KitchenLayoutConfig {
     },
     table: {
       visible: tb.visible !== false,
+      show_covers: tb.show_covers !== false,
       size: tb.size === "normal" ? "normal" : "double",
       bold: tb.bold !== false,
       label: typeof tb.label === "string" && tb.label.trim() ? tb.label.trim() : d.table.label,
@@ -176,6 +182,7 @@ export function normalizeKitchenLayout(raw: unknown): KitchenLayoutConfig {
       show_quantity: it.show_quantity !== false,
       show_guest_name: it.show_guest_name !== false,
       show_notes: it.show_notes !== false,
+      group_by_category: it.group_by_category !== false,
     },
     footer: {
       visible: ft.visible !== false,
@@ -225,6 +232,9 @@ export function ticketSectionStyle(layout: KitchenLayoutConfig, section: TicketS
 
 
 export interface KitchenTicketItem {
+  category_id?: string | null;
+  category_name?: string | null;
+  category_sort_order?: number | null;
   order_item_id?: string;
   menu_item_id?: string | null;
   item_number?: number | null;
@@ -262,6 +272,7 @@ export interface KitchenTicketPayload {
   session_id?: string;
   table_id?: string;
   table_number?: string | number | null;
+  num_covers?: number | null;
   department?: string;
   trigger_mode?: "auto" | "manual_reprint" | string;
   created_at?: string;
@@ -357,7 +368,7 @@ export function consolidateKitchenTicketItems(items: KitchenTicketItem[]): Kitch
       Math.max(1, Number(modifier?.qty ?? 1) || 1), Number(modifier?.price_adjustment ?? 0),
     ])).sort();
     const key = JSON.stringify([item.menu_item_id ?? null, item.item_number ?? null,
-      toStringValue(item.name).trim(), toStringValue(item.notes).trim(), normalizeDepartmentLabel(item.department), modifiers]);
+      toStringValue(item.name).trim(), toStringValue(item.notes).trim(), normalizeDepartmentLabel(item.department), kitchenCategoryKey(item), modifiers]);
     const quantity = Math.max(1, Number(item.quantity) || 1);
     const guest = toStringValue(item.guest_name).trim();
     const group = groups.get(key);
@@ -372,6 +383,23 @@ export function consolidateKitchenTicketItems(items: KitchenTicketItem[]): Kitch
   return [...groups.values()].map(group => group.item);
 }
 
+function kitchenCategoryKey(item: KitchenTicketItem): string {
+  const id = toStringValue(item.category_id).trim(), name = toStringValue(item.category_name).trim();
+  return id ? `id:${id}` : name ? `name:${name}` : '';
+}
+
+/** Keep dishes/notes stable inside each category; unknown categories form one final group. */
+export function sortKitchenItemsByCategory(items: KitchenTicketItem[]): KitchenTicketItem[] {
+  const groups = new Map<string, { items: KitchenTicketItem[]; order: number; first: number }>();
+  items.forEach((item, index) => {
+    const key = kitchenCategoryKey(item);
+    let group = groups.get(key);
+    if (!group) { group = { items: [], order: key && typeof item.category_sort_order === 'number' && Number.isFinite(item.category_sort_order) ? item.category_sort_order : Infinity, first: index }; groups.set(key, group); }
+    group.items.push(item);
+  });
+  return [...groups.entries()].sort(([a, x], [b, y]) => !a ? (b ? 1 : 0) : !b ? -1 : x.order - y.order || x.first - y.first).flatMap(([, group]) => group.items);
+}
+
 export function renderKitchenTicketCore(
   payload: KitchenTicketPayload,
   options?: { jobId?: string; layout?: unknown; serviceHeadings?: string[] },
@@ -384,7 +412,8 @@ export function renderKitchenTicketCore(
   const sepChar = layout.separator_char;
   const rasterMode = kitchenUsesRaster(layout);
 
-  const items = consolidateKitchenTicketItems(Array.isArray(payload.items) ? payload.items : []);
+  const mergedItems = consolidateKitchenTicketItems(Array.isArray(payload.items) ? payload.items : []);
+  const items = layout.items.group_by_category ? sortKitchenItemsByCategory(mergedItems) : mergedItems;
   const department = normalizeDepartmentLabel(payload.department);
   const restaurantName = toStringValue(payload.restaurant_name).trim() || "Ristorante";
   const tableLabel = toStringValue(payload.table_number).trim() || "-";
@@ -394,7 +423,7 @@ export function renderKitchenTicketCore(
 
   let lines: AnnotatedLine[] = [];
   let block: TicketBlock = 'header';
-  const addLine = (text: string, type: AnnotatedLine["type"], size: EscPosSize = "normal", bold = false, section: TicketSection = block, operational = false) => {
+  const addLine = (text: string, type: AnnotatedLine["type"], size: EscPosSize = "normal", bold = false, section: TicketSection = block, operational = false, rightText?: string) => {
     const styled = type !== 'separator' && type !== 'blank';
     const style: TicketTextStyle = styled ? ticketSectionStyle(layout, section) : { font: layout.font, align: layout.align, size, bold, space_after: 0 };
     // Service headings remain mandatory operational instructions, even with a hidden header.
@@ -404,8 +433,9 @@ export function renderKitchenTicketCore(
     const metric = ticketFontMetrics(layout, effective.font);
     // Column settings describe the base font's physical area. A narrower section
     // font can fit more characters in that same area without shrinking the text.
-    const capacity = Math.floor(contentDots / (metric.cell * scale));
-    for (const chunk of rasterMode ? [text] : wrapTicketText(text, Math.max(1, capacity - indent.length))) lines.push({ text: indent + chunk, type, size: effective.size, bold: effective.bold, align: effective.align, font: effective.font, section, block, ...(layout.native_profile ? { cell_dots: metric.cell, glyph_dots: metric.glyph } : {}), ...(rasterMode ? { size_pt: effective.size_pt ?? (effective.font === 'B' ? 9 : 12) * scale } : {}) });
+    const capacity = Math.floor((contentDots - (rightText ? (ticketTextColumns(rightText) + 1) * metric.cell : 0)) / (metric.cell * scale));
+    const chunks = rasterMode ? [text] : wrapTicketText(text, Math.max(1, capacity - indent.length));
+    for (const [index, chunk] of chunks.entries()) lines.push({ text: indent + chunk, type, size: effective.size, bold: effective.bold, align: rightText ? "left" : effective.align, font: effective.font, section, block, ...(rightText && index === chunks.length - 1 ? { right_text: rightText, right_size_pt: Math.min(12, effective.size_pt ?? (effective.font === 'B' ? 9 : 12) * scale) } : {}), ...(layout.native_profile ? { cell_dots: metric.cell, glyph_dots: metric.glyph } : {}), ...(rasterMode ? { size_pt: effective.size_pt ?? (effective.font === 'B' ? 9 : 12) * scale } : {}) });
     for (let i = 0; i < effective.space_after; i++) lines.push({ text: '', type: 'blank', size: 'normal', bold: false, align: effective.align, font: effective.font, section, block });
   };
   const addBlank = () => addLine("", "blank");
@@ -428,14 +458,24 @@ export function renderKitchenTicketCore(
   // ── Table ────────────────────────────────────────────────────────────────
   if (layout.table.visible) {
     const tableText = `${layout.table.label}: ${tableLabel}`;
-    addLine(tableText, "table", layout.table.size, layout.table.bold);
+    addLine(tableText, "table", layout.table.size, layout.table.bold, "table", false, layout.table.show_covers && typeof payload.num_covers === "number" && Number.isSafeInteger(payload.num_covers) && payload.num_covers > 0 ? `(${payload.num_covers})` : undefined);
     addBlank();
   }
 
   block = 'items';
   // ── Items ────────────────────────────────────────────────────────────────
   if (layout.items.visible || service) {
+    let previousCategory: string | undefined;
     for (const item of items) {
+      const category = kitchenCategoryKey(item);
+      if (layout.items.group_by_category && previousCategory !== undefined && category !== previousCategory) {
+        const metric = ticketFontMetrics(layout, layout.font);
+        lines.push({ text: separator('-', Math.max(1, width - 1)), type: 'separator', size: 'normal', bold: false,
+          font: layout.font, align: 'left', section: 'items', block: 'items',
+          ...(layout.native_profile ? { cell_dots: metric.cell, glyph_dots: metric.glyph } : {}),
+          ...(rasterMode ? { size_pt: layout.font === 'B' ? 9 : 12 } : {}) });
+      }
+      previousCategory = category;
       const qty = Math.max(1, Number(item.quantity) || 1);
       const numberPrefix = layout.items.show_item_number && item.item_number != null ? `#${item.item_number} ` : "";
       const qtyPrefix = layout.items.show_quantity || service ? `${qty}x ` : "";
@@ -529,7 +569,7 @@ export function renderKitchenTicketCore(
   if (!rasterMode && lines.some(line => /[^\x20-\x7e]/u.test(line.text))) {
     return renderKitchenTicketCore(payload, { ...options, layout: { ...layout, render_mode: 'raster' } });
   }
-  const text = lines.map((l) => l.text).join("\n");
+  const text = lines.map((l) => l.text + (l.right_text ? `  ${l.right_text}` : "")).join("\n");
   const htmlLines = lines
     .map((l) => {
       const styles: string[] = [];
@@ -568,7 +608,13 @@ export function buildKitchenEscPos(lines: AnnotatedLine[], rawLayout?: unknown):
     const lineDots = Math.max(36, ticketFontMetrics(layout, font).glyph * (line.size === 'double' ? 2 : 1) + 8);
     bytes.push(27, 69, line.bold ? 1 : 0, 29, 33, line.size === 'double' ? 17 : 0, 27, 51, lineDots);
     // eslint-disable-next-line no-control-regex -- prevent ESC/POS command injection from ticket text.
-    bytes.push(...encoder.encode(line.text.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ') + '\n'));
+    bytes.push(...encoder.encode(line.text.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ')));
+    if (line.right_text) {
+      const right = line.right_text.replace(/[^\x20-\x7e]/g, ' ');
+      const position = Math.max(0, dots - 8 - ticketTextColumns(right) * ticketFontMetrics(layout, font).cell);
+      bytes.push(29, 33, 0, 27, 36, position & 255, position >> 8, ...encoder.encode(right));
+    }
+    bytes.push(10);
   }
   bytes.push(27, 69, 0, 29, 33, 0, 27, 97, 0, 27, 77, 0, 27, 50, 27, 100, 5, 29, 86, 0);
   return Uint8Array.from(bytes);
