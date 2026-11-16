@@ -348,6 +348,30 @@ export function groupTicketItemsByDepartment(items: KitchenTicketItem[]): Record
   }, {});
 }
 
+/** Merge preparation-equivalent rows within this ticket, never across jobs or rounds. */
+export function consolidateKitchenTicketItems(items: KitchenTicketItem[]): KitchenTicketItem[] {
+  const groups = new Map<string, { item: KitchenTicketItem; guests: Set<string> }>();
+  for (const item of items) {
+    const modifiers = (Array.isArray(item.modifiers) ? item.modifiers : []).map(modifier => JSON.stringify([
+      toStringValue(modifier?.name).trim(), toStringValue(modifier?.modifier_type).trim().toLowerCase() || 'variant',
+      Math.max(1, Number(modifier?.qty ?? 1) || 1), Number(modifier?.price_adjustment ?? 0),
+    ])).sort();
+    const key = JSON.stringify([item.menu_item_id ?? null, item.item_number ?? null,
+      toStringValue(item.name).trim(), toStringValue(item.notes).trim(), normalizeDepartmentLabel(item.department), modifiers]);
+    const quantity = Math.max(1, Number(item.quantity) || 1);
+    const guest = toStringValue(item.guest_name).trim();
+    const group = groups.get(key);
+    if (group) {
+      group.item.quantity += quantity;
+      if (guest) group.guests.add(guest);
+      group.item.guest_name = [...group.guests].join(', ') || null;
+    } else {
+      groups.set(key, { item: { ...item, quantity }, guests: new Set(guest ? [guest] : []) });
+    }
+  }
+  return [...groups.values()].map(group => group.item);
+}
+
 export function renderKitchenTicketCore(
   payload: KitchenTicketPayload,
   options?: { jobId?: string; layout?: unknown; serviceHeadings?: string[] },
@@ -360,7 +384,7 @@ export function renderKitchenTicketCore(
   const sepChar = layout.separator_char;
   const rasterMode = kitchenUsesRaster(layout);
 
-  const items = Array.isArray(payload.items) ? payload.items : [];
+  const items = consolidateKitchenTicketItems(Array.isArray(payload.items) ? payload.items : []);
   const department = normalizeDepartmentLabel(payload.department);
   const restaurantName = toStringValue(payload.restaurant_name).trim() || "Ristorante";
   const tableLabel = toStringValue(payload.table_number).trim() || "-";
@@ -384,12 +408,10 @@ export function renderKitchenTicketCore(
     for (const chunk of rasterMode ? [text] : wrapTicketText(text, Math.max(1, capacity - indent.length))) lines.push({ text: indent + chunk, type, size: effective.size, bold: effective.bold, align: effective.align, font: effective.font, section, block, ...(layout.native_profile ? { cell_dots: metric.cell, glyph_dots: metric.glyph } : {}), ...(rasterMode ? { size_pt: effective.size_pt ?? (effective.font === 'B' ? 9 : 12) * scale } : {}) });
     for (let i = 0; i < effective.space_after; i++) lines.push({ text: '', type: 'blank', size: 'normal', bold: false, align: effective.align, font: effective.font, section, block });
   };
-  const addSep = (char = sepChar) => addLine(separator(char, width), "separator");
   const addBlank = () => addLine("", "blank");
 
   if (service) {
     for (const heading of headings) addLine(heading, "header", "normal", true, "header", true);
-    addSep("=");
   }
 
   // ── Header ──────────────────────────────────────────────────────────────
@@ -401,9 +423,6 @@ export function renderKitchenTicketCore(
       addLine(parts.join(" - "), "header", layout.header.size, layout.header.bold);
     }
   }
-
-  addSep();
-  addBlank();
 
   block = 'table';
   // ── Table ────────────────────────────────────────────────────────────────
@@ -464,7 +483,6 @@ export function renderKitchenTicketCore(
     }
   }
 
-  addSep();
 
   block = 'footer';
   // ── Footer ───────────────────────────────────────────────────────────────
@@ -483,9 +501,27 @@ export function renderKitchenTicketCore(
     }
   }
 
-  addSep("=");
 
-  if (layout.block_order) lines = layout.block_order.flatMap(value => lines.filter(line => line.block === value));
+  // Dividers are boundaries between actual content blocks, not unconditional
+  // decorations attached to headers/footers that may be hidden or reordered.
+  const ordered: AnnotatedLine[] = [];
+  let previousBlock: TicketBlock | undefined;
+  for (const currentBlock of layout.block_order ?? TICKET_BLOCK_ORDER) {
+    const content = lines.filter(line => line.block === currentBlock);
+    if (!content.some(line => line.type !== 'blank' && line.text.trim())) continue;
+    if (previousBlock) {
+      const metric = ticketFontMetrics(layout, layout.font);
+      ordered.push({ text: separator(service && previousBlock === 'header' ? '=' : sepChar, Math.max(1, width - 1)),
+        type: 'separator', size: 'normal', bold: false, font: layout.font, align: layout.align,
+        section: previousBlock, block: previousBlock,
+        ...(layout.native_profile ? { cell_dots: metric.cell, glyph_dots: metric.glyph } : {}),
+        ...(rasterMode ? { size_pt: layout.font === 'B' ? 9 : 12 } : {}),
+      });
+    }
+    ordered.push(...content);
+    previousBlock = currentBlock;
+  }
+  lines = ordered;
   const text = lines.map((l) => l.text).join("\n");
   const htmlLines = lines
     .map((l) => {

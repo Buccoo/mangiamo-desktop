@@ -50,3 +50,24 @@ test('Umaiya narrow-font items use the paper area rather than the wider base-fon
   assert.ok(titles.every(line => line.font === 'B' && line.size === 'double'));
   assert.ok(Buffer.from(core.buildKitchenEscPos(result.lines, layout)).includes(Buffer.from('2x #1 Sushi Assortito\n')));
 });
+
+test('consolidates table guests without merging different kitchen instructions or mutating jobs', () => {
+  const items = [
+    {menu_item_id:'sushi',name:'Sushi',item_number:1,quantity:2,added_by:'guest-a'},
+    {menu_item_id:'sushi',name:'Sushi',item_number:1,quantity:3,added_by:'guest-b'},
+    {menu_item_id:'sushi',name:'Sushi',item_number:1,quantity:1,notes:'senza wasabi'},
+  ];
+  const before=JSON.stringify(items);
+  const result=core.renderKitchenTicketCore({items},{layout:{header:{visible:false},table:{visible:false},footer:{visible:false}}});
+  assert.deepEqual(result.lines.filter(line=>line.type==='item').map(line=>line.text),['5x #1 Sushi','1x #1 Sushi']);
+  assert.equal(result.lines.filter(line=>line.type==='separator').length,0);
+  assert.equal(JSON.stringify(items),before);
+});
+test('rules only separate nonempty reordered blocks and leave room before the native paper edge', () => {
+  const layout={font:'A',width:48,printable_dots:576,header:{visible:false},footer:{show_restaurant_name:false},block_order:['footer','header','timestamp','table','items']};
+  const result=core.renderKitchenTicketCore({created_at:'2026-11-16T12:00:00Z',table_number:'5',items:[{name:'Sushi',quantity:1}]},{layout});
+  assert.deepEqual(result.lines.filter(line=>line.type!=='blank').map(line=>line.type),['timestamp','separator','table','separator','item']);
+  for(const line of result.lines.filter(line=>line.type==='separator')) {
+    assert.equal(line.size,'normal');assert.ok(core.ticketTextColumns(line.text)*12<576);
+  }
+});
