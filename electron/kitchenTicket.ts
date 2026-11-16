@@ -355,7 +355,8 @@ export function renderKitchenTicketCore(
   const headings = options?.serviceHeadings ?? [];
   const service = headings.length > 0;
   const layout = normalizeKitchenLayout(options?.layout);
-  const width = Math.min(layout.width, Math.floor(layout.printable_dots / ticketFontMetrics(layout, layout.font).cell));
+  const contentDots = Math.min(layout.width * ticketFontMetrics(layout, layout.font).cell, layout.printable_dots);
+  const width = Math.min(layout.width, Math.floor(contentDots / ticketFontMetrics(layout, layout.font).cell));
   const sepChar = layout.separator_char;
   const rasterMode = kitchenUsesRaster(layout);
 
@@ -377,7 +378,9 @@ export function renderKitchenTicketCore(
     const indent = type === 'item_sub' && effective.align === 'left' ? ' ' : '';
     const scale = effective.size === 'double' ? 2 : 1;
     const metric = ticketFontMetrics(layout, effective.font);
-    const capacity = Math.min(Math.floor(width / scale), Math.floor(layout.printable_dots / (metric.cell * scale)));
+    // Column settings describe the base font's physical area. A narrower section
+    // font can fit more characters in that same area without shrinking the text.
+    const capacity = Math.floor(contentDots / (metric.cell * scale));
     for (const chunk of rasterMode ? [text] : wrapTicketText(text, Math.max(1, capacity - indent.length))) lines.push({ text: indent + chunk, type, size: effective.size, bold: effective.bold, align: effective.align, font: effective.font, section, block, ...(layout.native_profile ? { cell_dots: metric.cell, glyph_dots: metric.glyph } : {}), ...(rasterMode ? { size_pt: effective.size_pt ?? (effective.font === 'B' ? 9 : 12) * scale } : {}) });
     for (let i = 0; i < effective.space_after; i++) lines.push({ text: '', type: 'blank', size: 'normal', bold: false, align: effective.align, font: effective.font, section, block });
   };

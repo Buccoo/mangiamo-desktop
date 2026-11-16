@@ -35,3 +35,18 @@ test('unrecognized profiles and malformed target keys are discarded; legacy layo
   assert.equal(layout.printer_profiles, undefined);
   assert.equal(layout.native_profile, undefined);
 });
+
+test('Umaiya narrow-font items use the paper area rather than the wider base-font column count', () => {
+  const layout = core.resolveKitchenPrinterLayout({ width: 42, printable_dots: 576, font: 'A', render_mode: 'native',
+    printer_profiles: { 'fixture:9100': 'custom-kube-ii' },
+    items: { size: 'double', show_guest_name: false }, styles: { items: { font: 'B', size: 'double', align: 'left' } },
+  }, 'fixture');
+  const result = core.renderKitchenTicketCore({ table_number: '5', items: [
+    { quantity: 2, item_number: 1, name: 'Sushi Assortito' },
+    { quantity: 1, item_number: 2, name: 'Gyoza Fritti', notes: 'senza aglio' },
+  ] }, { layout });
+  const titles = result.lines.filter(line => line.type === 'item');
+  assert.deepEqual(titles.map(line => line.text), ['2x #1 Sushi Assortito', '1x #2 Gyoza Fritti']);
+  assert.ok(titles.every(line => line.font === 'B' && line.size === 'double'));
+  assert.ok(Buffer.from(core.buildKitchenEscPos(result.lines, layout)).includes(Buffer.from('2x #1 Sushi Assortito\n')));
+});
