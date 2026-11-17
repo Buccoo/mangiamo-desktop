@@ -1,6 +1,23 @@
 export type TicketAlignment = "left" | "center" | "right";
 export type EscPosSize = "normal" | "double";
 export type EscPosFont = "A" | "B";
+export type TicketRenderMode = 'native' | 'raster';
+export type KitchenItemNumberStyle = 'parentheses' | 'hash' | 'plain';
+/** Missing mode preserves pre-selector layouts, including existing point sizes. */
+export function kitchenUsesRaster(layout: Pick<KitchenLayoutConfig, 'render_mode' | 'styles'>) {
+  return layout.render_mode === 'raster' || layout.render_mode !== 'native' && Object.values(layout.styles ?? {}).some(style => style?.size_pt != null);
+}
+export type TicketSection = "header" | "table" | "items" | "notes" | "guest" | "timestamp" | "footer";
+export type TicketBlock = "header" | "table" | "items" | "timestamp" | "footer";
+export const TICKET_BLOCK_ORDER: TicketBlock[] = ["header", "table", "items", "timestamp", "footer"];
+export interface TicketTextStyle {
+  font: EscPosFont;
+  size: EscPosSize;
+  bold: boolean;
+  align: TicketAlignment;
+  space_after: 0 | 1 | 2;
+  size_pt?: number;
+}
 
 export type LineType = "header" | "table" | "timestamp" | "item" | "item_sub" | "separator" | "footer" | "blank";
 
@@ -10,11 +27,21 @@ export interface AnnotatedLine {
   size: EscPosSize;
   bold: boolean;
   align?: TicketAlignment;
+  font?: EscPosFont;
+  section?: TicketSection;
+  block?: TicketBlock;
+  cell_dots?: number;
+  glyph_dots?: number;
+  size_pt?: number;
+  right_text?: string;
+  right_size_pt?: number;
+  preview_field?: string;
 }
 
 // ─── Kitchen layout ─────────────────────────────────────────────────────────
 
 export interface KitchenLayoutConfig {
+  render_mode?: TicketRenderMode;
   align: TicketAlignment;
   header: {
     visible: boolean;
@@ -28,15 +55,18 @@ export interface KitchenLayoutConfig {
     size: EscPosSize;
     bold: boolean;
     label: string;
+    show_covers: boolean;
   };
   items: {
     visible: boolean;
     size: EscPosSize;
     bold: boolean;
     show_item_number: boolean;
+    item_number_style?: KitchenItemNumberStyle;
     show_quantity: boolean;
     show_guest_name: boolean;
     show_notes: boolean;
+    group_by_category: boolean;
   };
   footer: {
     visible: boolean;
@@ -45,8 +75,14 @@ export interface KitchenLayoutConfig {
     custom_text: string;
   };
   separator_char: "-" | "=" | "*";
-  width: 32 | 42 | 48 | 80;
+  width: 30 | 32 | 42 | 48 | 80;
   font: EscPosFont;
+  printable_dots: 360 | 384 | 512 | 576 | 960;
+  styles?: Partial<Record<TicketSection, Partial<TicketTextStyle>>>;
+  block_order?: TicketBlock[];
+  printer_profiles?: Record<string, 'custom-kube-ii'>;
+  native_profile?: 'custom-kube-ii';
+  raster?: { dpi: 180 | 203 | 300; protocol: 'gs-v0' | 'esc-star' };
 }
 
 export const DEFAULT_KITCHEN_LAYOUT: KitchenLayoutConfig = {
@@ -63,15 +99,18 @@ export const DEFAULT_KITCHEN_LAYOUT: KitchenLayoutConfig = {
     size: "double",
     bold: true,
     label: "Tavolo",
+    show_covers: true,
   },
   items: {
     visible: true,
-    size: "double",
-    bold: true,
+    size: "normal",
+    bold: false,
     show_item_number: true,
+    item_number_style: 'parentheses',
     show_quantity: true,
     show_guest_name: true,
     show_notes: true,
+    group_by_category: true,
   },
   footer: {
     visible: true,
@@ -81,7 +120,8 @@ export const DEFAULT_KITCHEN_LAYOUT: KitchenLayoutConfig = {
   },
   separator_char: "-",
   width: 42,
-  font: "B",
+  font: "A",
+  printable_dots: 576,
 };
 
 export function normalizeKitchenLayout(raw: unknown): KitchenLayoutConfig {
@@ -91,8 +131,38 @@ export function normalizeKitchenLayout(raw: unknown): KitchenLayoutConfig {
   const tb = r.table && typeof r.table === "object" ? (r.table as Record<string, unknown>) : {};
   const it = r.items && typeof r.items === "object" ? (r.items as Record<string, unknown>) : {};
   const ft = r.footer && typeof r.footer === "object" ? (r.footer as Record<string, unknown>) : {};
+  const font = r.font === 'B' ? 'B' : 'A';
+  const requestedWidth = ([30, 32, 42, 48, 80] as number[]).includes(Number(r.width)) ? Number(r.width) : d.width;
+  const printableDots = ([360, 384, 512, 576, 960] as number[]).includes(Number(r.printable_dots)) ? Number(r.printable_dots) : requestedWidth === 80 ? 960 : 576;
+  const width = Math.max(...[30, 32, 42, 48, 80].filter(value => value <= requestedWidth && value * (font === 'A' ? 12 : 9) <= printableDots)) as KitchenLayoutConfig['width'];
+  const styles: KitchenLayoutConfig['styles'] = {};
+  const rawStyles = r.styles && typeof r.styles === 'object' ? r.styles as Record<string, unknown> : {};
+  for (const section of [...TICKET_BLOCK_ORDER, 'notes', 'guest'] as TicketSection[]) {
+    const candidate = rawStyles[section];
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+    const value = candidate as Record<string, unknown>;
+    const style: Partial<TicketTextStyle> = {};
+    if (value.font === 'A' || value.font === 'B') style.font = value.font;
+    if (value.size === 'normal' || value.size === 'double') style.size = value.size;
+    if (typeof value.size_pt === 'number' && Number.isFinite(value.size_pt) && value.size_pt >= 4 && value.size_pt <= 72) style.size_pt = Math.round(value.size_pt * 10) / 10;
+    if (typeof value.bold === 'boolean') style.bold = value.bold;
+    if (value.align === 'left' || value.align === 'center' || value.align === 'right') style.align = value.align;
+    if (value.space_after === 0 || value.space_after === 1 || value.space_after === 2) style.space_after = value.space_after;
+    if (Object.keys(style).length) styles[section] = style;
+  }
+  const rawOrder = r.block_order;
+  const blockOrder = Array.isArray(rawOrder) ? [...new Set(rawOrder.filter((value): value is TicketBlock => TICKET_BLOCK_ORDER.includes(value as TicketBlock))), ...TICKET_BLOCK_ORDER.filter(value => !rawOrder.includes(value))] : undefined;
+  const profiles: Record<string, 'custom-kube-ii'> = {};
+  const raster = r.raster && typeof r.raster === 'object' ? r.raster as Record<string, unknown> : null;
+  if (r.printer_profiles && typeof r.printer_profiles === 'object' && !Array.isArray(r.printer_profiles)) {
+    for (const [key, value] of Object.entries(r.printer_profiles).slice(0, 64)) {
+      const port = Number(key.slice(key.lastIndexOf(':') + 1));
+      if (/^[a-zA-Z0-9.:[\]_-]{1,253}:\d{1,5}$/.test(key) && port >= 1 && port <= 65535 && value === 'custom-kube-ii') profiles[key.toLowerCase()] = value;
+    }
+  }
 
   return {
+    ...(r.render_mode === 'native' || r.render_mode === 'raster' ? { render_mode: r.render_mode } : {}),
     align: r.align === "left" || r.align === "right" ? r.align : "center",
     header: {
       visible: h.visible !== false,
@@ -103,18 +173,21 @@ export function normalizeKitchenLayout(raw: unknown): KitchenLayoutConfig {
     },
     table: {
       visible: tb.visible !== false,
+      show_covers: tb.show_covers !== false,
       size: tb.size === "normal" ? "normal" : "double",
       bold: tb.bold !== false,
       label: typeof tb.label === "string" && tb.label.trim() ? tb.label.trim() : d.table.label,
     },
     items: {
       visible: it.visible !== false,
-      size: it.size === "normal" ? "normal" : "double",
-      bold: it.bold !== false,
+      size: it.size === "double" ? "double" : "normal",
+      bold: it.bold === true,
       show_item_number: it.show_item_number !== false,
+      item_number_style: it.item_number_style === 'hash' || it.item_number_style === 'plain' ? it.item_number_style : 'parentheses',
       show_quantity: it.show_quantity !== false,
       show_guest_name: it.show_guest_name !== false,
       show_notes: it.show_notes !== false,
+      group_by_category: it.group_by_category !== false,
     },
     footer: {
       visible: ft.visible !== false,
@@ -123,13 +196,50 @@ export function normalizeKitchenLayout(raw: unknown): KitchenLayoutConfig {
       custom_text: typeof ft.custom_text === "string" ? ft.custom_text : "",
     },
     separator_char: ["-", "=", "*"].includes(String(r.separator_char)) ? (String(r.separator_char) as "-" | "=" | "*") : d.separator_char,
-    width: ([32, 42, 48, 80] as number[]).includes(Number(r.width)) ? (Number(r.width) as 32 | 42 | 48 | 80) : d.width,
-    font: r.font === "A" ? "A" : "B",
+    width,
+    font,
+    printable_dots: printableDots as KitchenLayoutConfig['printable_dots'],
+    ...(Object.keys(styles).length ? { styles } : {}),
+    ...(blockOrder ? { block_order: blockOrder } : {}),
+    ...(Object.keys(profiles).length ? { printer_profiles: profiles } : {}),
+    ...(r.native_profile === 'custom-kube-ii' ? { native_profile: 'custom-kube-ii' as const } : {}),
+    ...(raster ? { raster: { dpi: ([180,203,300].includes(Number(raster.dpi)) ? Number(raster.dpi) : 203) as 180 | 203 | 300, protocol: raster.protocol === 'esc-star' ? 'esc-star' as const : 'gs-v0' as const } } : {}),
   };
+}
+
+export function printerProfileKey(host: string, port = 9100) { return `${host.trim().toLowerCase()}:${port}`; }
+
+/** Resolve only the destination's profile. Never send CUSTOM-only commands to
+ * another printer sharing the restaurant's ticket layout. 576 dots is a safe
+ * 72mm subset of KUBE II's documented 76/80mm areas, not a roll measurement. */
+export function resolveKitchenPrinterLayout(raw: unknown, host: string, port = 9100): KitchenLayoutConfig {
+  const layout = normalizeKitchenLayout(raw);
+  delete layout.native_profile;
+  if (layout.printer_profiles?.[printerProfileKey(host, port)] === 'custom-kube-ii') {
+    layout.native_profile = 'custom-kube-ii';
+    layout.printable_dots = Math.min(layout.printable_dots, 576) as KitchenLayoutConfig['printable_dots'];
+    if (layout.raster) layout.raster.dpi = 203;
+  }
+  return layout;
+}
+
+export function ticketFontMetrics(layout: { native_profile?: string }, font: EscPosFont) {
+  return layout.native_profile === 'custom-kube-ii'
+    ? { cell: font === 'A' ? 14 : 10, glyph: 24 }
+    : { cell: font === 'A' ? 12 : 9, glyph: font === 'A' ? 24 : 17 };
+}
+
+/** Explicit edits override legacy controls without freezing their defaults. */
+export function ticketSectionStyle(layout: KitchenLayoutConfig, section: TicketSection): TicketTextStyle {
+  const legacy = section === 'header' ? layout.header : section === 'table' ? layout.table : section === 'items' ? layout.items : undefined;
+  return { font: layout.font, size: legacy?.size ?? 'normal', bold: legacy?.bold ?? false, align: layout.align, space_after: 0, ...layout.styles?.[section] };
 }
 
 
 export interface KitchenTicketItem {
+  category_id?: string | null;
+  category_name?: string | null;
+  category_sort_order?: number | null;
   order_item_id?: string;
   menu_item_id?: string | null;
   item_number?: number | null;
@@ -167,6 +277,7 @@ export interface KitchenTicketPayload {
   session_id?: string;
   table_id?: string;
   table_number?: string | number | null;
+  num_covers?: number | null;
   department?: string;
   trigger_mode?: "auto" | "manual_reprint" | string;
   created_at?: string;
@@ -224,6 +335,7 @@ function formatTimestamp(value: string | null | undefined): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString("it-IT", {
+    timeZone: "Europe/Rome",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -252,6 +364,47 @@ export function groupTicketItemsByDepartment(items: KitchenTicketItem[]): Record
   }, {});
 }
 
+/** Merge preparation-equivalent rows within this ticket, never across jobs or rounds. */
+export function consolidateKitchenTicketItems(items: KitchenTicketItem[]): KitchenTicketItem[] {
+  const groups = new Map<string, { item: KitchenTicketItem; guests: Set<string> }>();
+  for (const item of items) {
+    const modifiers = (Array.isArray(item.modifiers) ? item.modifiers : []).map(modifier => JSON.stringify([
+      toStringValue(modifier?.name).trim(), toStringValue(modifier?.modifier_type).trim().toLowerCase() || 'variant',
+      Math.max(1, Number(modifier?.qty ?? 1) || 1), Number(modifier?.price_adjustment ?? 0),
+    ])).sort();
+    const key = JSON.stringify([item.menu_item_id ?? null, item.item_number ?? null,
+      toStringValue(item.name).trim(), toStringValue(item.notes).trim(), normalizeDepartmentLabel(item.department), kitchenCategoryKey(item), modifiers]);
+    const quantity = Math.max(1, Number(item.quantity) || 1);
+    const guest = toStringValue(item.guest_name).trim();
+    const group = groups.get(key);
+    if (group) {
+      group.item.quantity += quantity;
+      if (guest) group.guests.add(guest);
+      group.item.guest_name = [...group.guests].join(', ') || null;
+    } else {
+      groups.set(key, { item: { ...item, quantity }, guests: new Set(guest ? [guest] : []) });
+    }
+  }
+  return [...groups.values()].map(group => group.item);
+}
+
+function kitchenCategoryKey(item: KitchenTicketItem): string {
+  const id = toStringValue(item.category_id).trim(), name = toStringValue(item.category_name).trim();
+  return id ? `id:${id}` : name ? `name:${name}` : '';
+}
+
+/** Keep dishes/notes stable inside each category; unknown categories form one final group. */
+export function sortKitchenItemsByCategory(items: KitchenTicketItem[]): KitchenTicketItem[] {
+  const groups = new Map<string, { items: KitchenTicketItem[]; order: number; first: number }>();
+  items.forEach((item, index) => {
+    const key = kitchenCategoryKey(item);
+    let group = groups.get(key);
+    if (!group) { group = { items: [], order: key && typeof item.category_sort_order === 'number' && Number.isFinite(item.category_sort_order) ? item.category_sort_order : Infinity, first: index }; groups.set(key, group); }
+    group.items.push(item);
+  });
+  return [...groups.entries()].sort(([a, x], [b, y]) => !a ? (b ? 1 : 0) : !b ? -1 : x.order - y.order || x.first - y.first).flatMap(([, group]) => group.items);
+}
+
 export function renderKitchenTicketCore(
   payload: KitchenTicketPayload,
   options?: { jobId?: string; layout?: unknown; serviceHeadings?: string[] },
@@ -259,10 +412,13 @@ export function renderKitchenTicketCore(
   const headings = options?.serviceHeadings ?? [];
   const service = headings.length > 0;
   const layout = normalizeKitchenLayout(options?.layout);
-  const width = layout.width;
+  const contentDots = Math.min(layout.width * ticketFontMetrics(layout, layout.font).cell, layout.printable_dots);
+  const width = Math.min(layout.width, Math.floor(contentDots / ticketFontMetrics(layout, layout.font).cell));
   const sepChar = layout.separator_char;
+  const rasterMode = kitchenUsesRaster(layout);
 
-  const items = Array.isArray(payload.items) ? payload.items : [];
+  const mergedItems = consolidateKitchenTicketItems(Array.isArray(payload.items) ? payload.items : []);
+  const items = layout.items.group_by_category ? sortKitchenItemsByCategory(mergedItems) : mergedItems;
   const department = normalizeDepartmentLabel(payload.department);
   const restaurantName = toStringValue(payload.restaurant_name).trim() || "Ristorante";
   const tableLabel = toStringValue(payload.table_number).trim() || "-";
@@ -270,19 +426,27 @@ export function renderKitchenTicketCore(
   const createdAt = formatTimestamp(payload.created_at);
   const jobId = toStringValue(options?.jobId).trim();
 
-  const lines: AnnotatedLine[] = [];
-
-  const addLine = (text: string, type: AnnotatedLine["type"], size: AnnotatedLine["size"] = "normal", bold = false) => {
-    const indent = type === 'item_sub' && layout.align === 'left' ? ' ' : '';
-    const columns = Math.max(1, Math.floor(width / (size === 'double' ? 2 : 1)) - indent.length);
-    for (const chunk of wrapTicketText(text, columns)) lines.push({ text: indent + chunk, type, size, bold, align: layout.align });
+  let lines: AnnotatedLine[] = [];
+  let block: TicketBlock = 'header';
+  const addLine = (text: string, type: AnnotatedLine["type"], size: EscPosSize = "normal", bold = false, section: TicketSection = block, operational = false, rightText?: string) => {
+    const styled = type !== 'separator' && type !== 'blank';
+    const style: TicketTextStyle = styled ? ticketSectionStyle(layout, section) : { font: layout.font, align: layout.align, size, bold, space_after: 0 };
+    // Service headings remain mandatory operational instructions, even with a hidden header.
+    const effective = operational && !layout.styles?.header ? { ...style, size, bold } : style;
+    const indent = type === 'item_sub' && effective.align === 'left' ? ' ' : '';
+    const scale = effective.size === 'double' ? 2 : 1;
+    const metric = ticketFontMetrics(layout, effective.font);
+    // Column settings describe the base font's physical area. A narrower section
+    // font can fit more characters in that same area without shrinking the text.
+    const capacity = Math.floor((contentDots - (rightText ? (ticketTextColumns(rightText) + 1) * metric.cell : 0)) / (metric.cell * scale));
+    const chunks = rasterMode ? [text] : wrapTicketText(text, Math.max(1, capacity - indent.length));
+    for (const [index, chunk] of chunks.entries()) lines.push({ text: indent + chunk, type, size: effective.size, bold: effective.bold, align: rightText ? "left" : effective.align, font: effective.font, section, block, ...(rightText && index === chunks.length - 1 ? { right_text: rightText, right_size_pt: Math.min(12, effective.size_pt ?? (effective.font === 'B' ? 9 : 12) * scale) } : {}), ...(layout.native_profile ? { cell_dots: metric.cell, glyph_dots: metric.glyph } : {}), ...(rasterMode ? { size_pt: effective.size_pt ?? (effective.font === 'B' ? 9 : 12) * scale } : {}) });
+    for (let i = 0; i < effective.space_after; i++) lines.push({ text: '', type: 'blank', size: 'normal', bold: false, align: effective.align, font: effective.font, section, block });
   };
-  const addSep = (char = sepChar) => addLine(separator(char, width), "separator");
   const addBlank = () => addLine("", "blank");
 
   if (service) {
-    for (const heading of headings) addLine(heading, "header", "normal", true);
-    addSep("=");
+    for (const heading of headings) addLine(heading, "header", "normal", true, "header", true);
   }
 
   // ── Header ──────────────────────────────────────────────────────────────
@@ -295,21 +459,31 @@ export function renderKitchenTicketCore(
     }
   }
 
-  addSep();
-  addBlank();
-
+  block = 'table';
   // ── Table ────────────────────────────────────────────────────────────────
   if (layout.table.visible) {
     const tableText = `${layout.table.label}: ${tableLabel}`;
-    addLine(tableText, "table", layout.table.size, layout.table.bold);
+    addLine(tableText, "table", layout.table.size, layout.table.bold, "table", false, layout.table.show_covers && typeof payload.num_covers === "number" && Number.isSafeInteger(payload.num_covers) && payload.num_covers > 0 ? `(${payload.num_covers})` : undefined);
     addBlank();
   }
 
+  block = 'items';
   // ── Items ────────────────────────────────────────────────────────────────
   if (layout.items.visible || service) {
+    let previousCategory: string | undefined;
     for (const item of items) {
+      const category = kitchenCategoryKey(item);
+      if (layout.items.group_by_category && previousCategory !== undefined && category !== previousCategory) {
+        const metric = ticketFontMetrics(layout, layout.font);
+        lines.push({ text: separator('-', Math.max(1, width - 1)), type: 'separator', size: 'normal', bold: false,
+          font: layout.font, align: 'left', section: 'items', block: 'items',
+          ...(layout.native_profile ? { cell_dots: metric.cell, glyph_dots: metric.glyph } : {}),
+          ...(rasterMode ? { size_pt: layout.font === 'B' ? 9 : 12 } : {}) });
+      }
+      previousCategory = category;
       const qty = Math.max(1, Number(item.quantity) || 1);
-      const numberPrefix = layout.items.show_item_number && item.item_number != null ? `#${item.item_number} ` : "";
+      const number = layout.items.item_number_style === 'hash' ? `#${item.item_number}` : layout.items.item_number_style === 'plain' ? `${item.item_number}` : `(${item.item_number})`;
+      const numberPrefix = layout.items.show_item_number && item.item_number != null ? `${number} ` : "";
       const qtyPrefix = layout.items.show_quantity || service ? `${qty}x ` : "";
       const itemTitle = `${qtyPrefix}${numberPrefix}${toStringValue(item.name).trim()}`;
 
@@ -318,14 +492,14 @@ export function renderKitchenTicketCore(
       if (layout.items.show_guest_name) {
         const guest = toStringValue(item.guest_name).trim();
         if (guest) {
-          addLine(`Ospite: ${guest}`, "item_sub");
+          addLine(`Ospite: ${guest}`, "item_sub", "normal", false, "guest");
         }
       }
 
       if (layout.items.show_notes) {
         const notes = toStringValue(item.notes).trim();
         if (notes) {
-          addLine(`Nota: ${notes}`, "item_sub");
+          addLine(`Nota: ${notes}`, "item_sub", "normal", false, "notes");
         }
       }
 
@@ -349,19 +523,23 @@ export function renderKitchenTicketCore(
               : "";
             line = `${prefix}${modifierName}${qtySuffix}${priceSuffix}`;
           }
-          addLine(line, "item_sub");
+          addLine(line, "item_sub", "normal", false, "notes");
         }
       }
     }
   }
 
-  addSep();
 
+  block = 'footer';
   // ── Footer ───────────────────────────────────────────────────────────────
   if (layout.footer.visible) {
     const footerParts: string[] = [];
     if (layout.footer.show_restaurant_name) footerParts.push(restaurantName);
-    if (layout.footer.show_timestamp && createdAt) footerParts.push(createdAt);
+    const separateTimestamp = !!layout.block_order || !!layout.styles?.timestamp || !!layout.styles?.footer;
+    if (layout.footer.show_timestamp && createdAt) {
+      if (separateTimestamp) { block = 'timestamp'; addLine(createdAt, 'timestamp'); block = 'footer'; }
+      else footerParts.push(createdAt);
+    }
     const footerLine = footerParts.join(" - ");
     if (footerLine) addLine(footerLine, "footer");
     if (layout.footer.custom_text.trim()) {
@@ -369,20 +547,48 @@ export function renderKitchenTicketCore(
     }
   }
 
-  addSep("=");
 
-  const text = lines.map((l) => l.text).join("\n");
+  // Dividers are boundaries between actual content blocks, not unconditional
+  // decorations attached to headers/footers that may be hidden or reordered.
+  const ordered: AnnotatedLine[] = [];
+  let previousBlock: TicketBlock | undefined;
+  for (const currentBlock of layout.block_order ?? TICKET_BLOCK_ORDER) {
+    const content = lines.filter(line => line.block === currentBlock);
+    if (!content.some(line => line.type !== 'blank' && line.text.trim())) continue;
+    if (previousBlock) {
+      const metric = ticketFontMetrics(layout, layout.font);
+      ordered.push({ text: separator(service && previousBlock === 'header' ? '=' : sepChar, Math.max(1, width - 1)),
+        type: 'separator', size: 'normal', bold: false, font: layout.font, align: layout.align,
+        section: previousBlock, block: previousBlock,
+        ...(layout.native_profile ? { cell_dots: metric.cell, glyph_dots: metric.glyph } : {}),
+        ...(rasterMode ? { size_pt: layout.font === 'B' ? 9 : 12 } : {}),
+      });
+    }
+    ordered.push(...content);
+    previousBlock = currentBlock;
+  }
+  lines = ordered;
+  // Native firmware code pages cannot safely interpret UTF-8. Re-render the
+  // original fields before wrapping so Unicode names/notes keep their glyphs
+  // and use the same bundled-font image in preview and on the printer.
+  // eslint-disable-next-line no-control-regex -- ASCII is the only portable native encoding.
+  if (!rasterMode && lines.some(line => /[^\x20-\x7e]/u.test(line.text))) {
+    return renderKitchenTicketCore(payload, { ...options, layout: { ...layout, render_mode: 'raster' } });
+  }
+  const text = lines.map((l) => l.text + (l.right_text ? `  ${l.right_text}` : "")).join("\n");
   const htmlLines = lines
     .map((l) => {
       const styles: string[] = [];
-      if (l.size === "double") styles.push("font-size:2em");
+      const fontScale = l.font === 'B' ? 0.75 : 1;
+      if (l.size === "double" && fontScale === 1) styles.push("font-size:2em");
+      else if (fontScale !== 1) styles.push(`font-size:${fontScale * (l.size === 'double' ? 2 : 1)}em`);
       styles.push(`display:block;text-align:${l.align ?? "left"}`);
       if (l.bold) styles.push("font-weight:bold");
       const style = styles.join(";");
       return `<span${style ? ` style="${style}"` : ""}>${escapeHtml(l.text) || "\u00A0"}</span>`;
     })
     .join("");
-  const html = `<div class="ticket-preview" data-job-id="${escapeHtml(jobId || "-")}"><pre>${htmlLines}</pre></div>`;
+  const html = `<div class="ticket-preview" data-job-id="${escapeHtml(jobId || "-")}"><pre style="font-family:monospace;line-height:1.5;white-space:pre;width:${width}ch">${htmlLines}</pre></div>`;
 
   return { text, html, lines };
 }
@@ -391,14 +597,31 @@ export function renderKitchenTicketCore(
 /** Per-line styling is explicit: product names must never act as ESC/POS commands. */
 export function buildKitchenEscPos(lines: AnnotatedLine[], rawLayout?: unknown): Uint8Array {
   const layout = normalizeKitchenLayout(rawLayout);
-  const bytes: number[] = [27, 64, 27, 77, layout.font === 'A' ? 0 : 1, 27, 32, 0];
+  // Use the same fixed cell geometry as the preview. The printer must support
+  // this printable width; 80 columns is intended for wide-format hardware.
+  const dots = layout.printable_dots;
+  // ESC 3 uses the configured motion unit, which may be half a dot after a
+  // firmware reset. Set one 203-dpi dot before positioning or line spacing.
+  const bytes: number[] = [27, 64, 29, 80, 203, 203, 27, 77, layout.font === 'A' ? 0 : 1, 27, 32, 0,
+    29, 76, 0, 0, 29, 87, dots & 255, dots >> 8];
+  // CUSTOM DOMC-0006I: explicitly choose A=15 / B=20 CPI for this ticket.
+  if (layout.native_profile === 'custom-kube-ii') bytes.push(27, 193, 1);
   const encoder = new TextEncoder();
   for (const line of lines) {
+    const font = line.font ?? layout.font;
+    bytes.push(27, 77, font === 'A' ? 0 : 1);
     bytes.push(27, 97, line.align === 'right' ? 2 : line.align === 'left' ? 0 : 1);
-    bytes.push(27, 69, line.bold ? 1 : 0, 29, 33, line.size === 'double' ? 17 : 0);
+    const lineDots = Math.max(36, ticketFontMetrics(layout, font).glyph * (line.size === 'double' ? 2 : 1) + 8);
+    bytes.push(27, 69, line.bold ? 1 : 0, 29, 33, line.size === 'double' ? 17 : 0, 27, 51, lineDots);
     // eslint-disable-next-line no-control-regex -- prevent ESC/POS command injection from ticket text.
-    bytes.push(...encoder.encode(line.text.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ') + '\n'));
+    bytes.push(...encoder.encode(line.text.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ')));
+    if (line.right_text) {
+      const right = line.right_text.replace(/[^\x20-\x7e]/g, ' ');
+      const position = Math.max(0, dots - 8 - ticketTextColumns(right) * ticketFontMetrics(layout, font).cell);
+      bytes.push(29, 33, 0, 27, 36, position & 255, position >> 8, ...encoder.encode(right));
+    }
+    bytes.push(10);
   }
-  bytes.push(27, 69, 0, 29, 33, 0, 27, 97, 0, 27, 77, 1, 27, 100, 5, 29, 86, 0);
+  bytes.push(27, 69, 0, 29, 33, 0, 27, 97, 0, 27, 77, 0, 27, 50, 27, 100, 5, 29, 86, 0);
   return Uint8Array.from(bytes);
 }

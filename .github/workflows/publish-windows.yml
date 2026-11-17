@@ -1,0 +1,74 @@
+name: Publish verified Windows build
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: Successful Windows build run containing windows-build
+        required: true
+        type: string
+permissions:
+  contents: write
+  actions: read
+jobs:
+  publish-windows:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mangiamo-desktop
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          path: mangiamo-desktop
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate source run and unchanged application sources
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$BUILD_RUN_ID" =~ ^[0-9]+$ ]]
+          SOURCE_SHA=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID" --jq .head_sha)
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID/jobs" --jq '.jobs[] | select(.name == "build-windows") | .conclusion' | grep -qx success
+          git diff --exit-code "$SOURCE_SHA" HEAD -- electron scripts assets package.json package-lock.json
+          gh run download "$BUILD_RUN_ID" --repo "$GITHUB_REPOSITORY" --name windows-build --dir dist-desktop
+      - name: Verify startup proof, version, installer and manifest
+        id: version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          node scripts/desktop/verify-release-artifacts.cjs dist-desktop "$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Publish Windows release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "v$VERSION" >/dev/null 2>&1; then
+            gh release create "v$VERSION" --target "$GITHUB_SHA" --title "Mangiamo Desktop $VERSION — Windows" --notes "Windows update: kitchen item wrapping, conditional dividers and consolidated dish quantities. Mac remains on its previous version." --draft
+          fi
+          gh release upload "v$VERSION" dist-desktop/* --clobber
+          gh release edit "v$VERSION" --draft=false --latest
+      - name: Publish Windows updater feed
+        env:
+          GH_TOKEN: ${{ secrets.SUSHIAMO_PROD_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          PUBLIC_APP_URL: https://manager.mangiamo.app
+        run: |
+          set -euo pipefail
+          cd ..
+          gh auth setup-git
+          gh repo clone Buccoo/mangiamo-manager repo-clone
+          cd repo-clone
+          git checkout main
+          git pull --ff-only
+          node ../mangiamo-desktop/scripts/desktop/verify-release-artifacts.cjs ../mangiamo-desktop/dist-desktop "$VERSION"
+          node scripts/print/publish-desktop-build.mjs --platform win
+          node scripts/print/publish-desktop-updater.mjs
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add public/downloads/latest.yml public/downloads/Mangiamo-Desktop-Setup.exe public/downloads/Mangiamo-Desktop-Setup.exe.blockmap public/downloads/SushiAMO-Desktop-Setup.exe.blockmap public/downloads/printer-updates/windows/latest.json
+          git diff --cached --quiet || git commit -m "chore: publish Windows desktop $VERSION"
+          git push

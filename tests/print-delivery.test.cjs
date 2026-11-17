@@ -11,8 +11,8 @@ function loadWorkerExports(netOverride) {
   const source = require("node:fs").readFileSync(path.join(__dirname, "../electron-dist/printWorker.cjs"), "utf8");
   const module = { exports: {} };
   const actualRequire = createRequire(path.join(__dirname, "../electron-dist/printWorker.cjs"));
-  vm.runInNewContext(source + "\nmodule.exports.renderTicketForTest = renderTicket; module.exports.resolveRouteForTest = DesktopPrintWorker.prototype.resolveRouteForJob; module.exports.openRawSocketForTest = openRawSocket; module.exports.sendToPrinterForTest = DesktopPrintWorker.prototype.sendToPrinter; module.exports.fetchLiveRoutesForTest = DesktopPrintWorker.prototype.fetchLivePrinterRoutes;", {
-    module, exports: module.exports, require: (name) => name === "node:net" && netOverride ? netOverride : actualRequire(name), Buffer, process, __dirname: path.join(__dirname, "../electron-dist"),
+  vm.runInNewContext(source + "\nmodule.exports.escPosForTest = buildEscPosPayload; module.exports.renderTicketForTest = renderTicket; module.exports.resolveRouteForTest = DesktopPrintWorker.prototype.resolveRouteForJob; module.exports.openRawSocketForTest = openRawSocket; module.exports.sendToPrinterForTest = DesktopPrintWorker.prototype.sendToPrinter; module.exports.fetchLiveRoutesForTest = DesktopPrintWorker.prototype.fetchLivePrinterRoutes;", {
+    module, exports: module.exports, require: (name) => name === "node:net" && netOverride ? netOverride : actualRequire(name), Buffer, process, __dirname: path.join(__dirname, "../electron-dist"), setTimeout, clearTimeout,
   });
   return module.exports;
 }
@@ -72,14 +72,14 @@ async function actualPrintBytes(job) {
   return printed;
 }
 
-test("actual PIN bytes enlarge only the PIN and reach the same cutter position as working kitchen tickets", async () => {
+test("actual PIN bytes enlarge only the PIN and leave eight blank lines before cutting", async () => {
   const printed = await actualPrintBytes(pinJob());
   assert.deepEqual(printed, Buffer.concat([
     Buffer.from([0x1b, 0x40, 0x1b, 0x4d, 0, 0x1b, 0x20, 2, 0x1b, 0x61, 1, 0x1b, 0x45, 1]),
     Buffer.from("TAV. 12\n"),
     Buffer.from([0x1d, 0x21, 0x11]),
     Buffer.from("PIN: 0123\n"),
-    Buffer.from([0x1b, 0x45, 0, 0x1d, 0x21, 0, 0x1b, 0x61, 0, 0x1b, 0x4d, 1, 0x1b, 0x64, 5, 0x1d, 0x56, 0]),
+    Buffer.from([0x1b, 0x45, 0, 0x1d, 0x21, 0, 0x1b, 0x61, 0, 0x1b, 0x4d, 1, 0x1b, 0x64, 8, 0x1d, 0x56, 0]),
   ]));
 });
 
@@ -118,7 +118,7 @@ test("the desktop sends the complete PIN and cut sequence to its explicit TCP de
       receiving,
     ]);
     assert.deepEqual(bytes, await actualPrintBytes(pinJob()));
-    assert.deepEqual(bytes.subarray(-6), Buffer.from([0x1b, 0x64, 5, 0x1d, 0x56, 0]));
+    assert.deepEqual(bytes.subarray(-6), Buffer.from([0x1b, 0x64, 8, 0x1d, 0x56, 0]));
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -127,13 +127,13 @@ test("the desktop sends the complete PIN and cut sequence to its explicit TCP de
 test("ordinary kitchen transport keeps its existing five-line feed and cut", async () => {
   const printed = await actualPrintBytes({ department: "sushi", payload: { items: [{ name: "Nigiri", quantity: 1 }] } });
   assert.deepEqual(printed.subarray(-6), Buffer.from([0x1b, 0x64, 5, 0x1d, 0x56, 0]));
-  assert.match(printed.toString(), /COMANDA SUSHI/i);
+  assert.match(printed.toString(), /COMANDA sushi/);
 });
 
 test("a kitchen department named pin remains a food ticket on its kitchen printer", async () => {
   const job = { department: "pin", order_id: "food-order", payload: { department: "pin", items: [{ name: "Nigiri", quantity: 1 }] } };
   const printed = await actualPrintBytes(job);
-  assert.match(printed.toString(), /COMANDA PIN/i);
+  assert.match(printed.toString(), /COMANDA pin/);
   assert.match(printed.toString(), /1x Nigiri/);
   assert.deepEqual(printed.subarray(-6), Buffer.from([0x1b, 0x64, 5, 0x1d, 0x56, 0]));
   const kitchen = { id: "kitchen", host: "kitchen", port: 9100, enabled: true };
@@ -318,3 +318,19 @@ test("reviewed receipt generation cannot reuse an older sent journal entry", asy
   assert.equal(sends, 1);
   assert.equal((await journal.list())[0].generation, 0);
 }));
+
+
+test("kitchen product rows use readable Font A, normal weight/size and explicit spacing", () => {
+  const payload = loadWorkerExports().escPosForTest('TAVOLO: 7\n3x Salmone Nigiri\n Nota: senza cetriolo\n2x California Roll');
+  assert.ok(payload.includes(Buffer.from([0x1b,0x4d,0])));
+  assert.ok(payload.includes(Buffer.from([0x1b,0x33,36])));
+  // The table is prominent, but the product section is reset to regular text.
+  const start=payload.indexOf(Buffer.from('3x Salmone'));
+  assert.ok(start>0);
+  const prefix=payload.subarray(0,start);
+  assert.ok(prefix.lastIndexOf(Buffer.from([0x1b,0x45,0]))>prefix.lastIndexOf(Buffer.from([0x1b,0x45,1])));
+  assert.ok(prefix.lastIndexOf(Buffer.from([0x1d,0x21,0]))>prefix.lastIndexOf(Buffer.from([0x1d,0x21,0x11])));
+  assert.ok(!payload.subarray(start).includes(Buffer.from([0x1d,0x21,0x11])));
+  assert.ok(payload.includes(Buffer.from('Nota: senza cetriolo')));
+  assert.ok(payload.subarray(-6).equals(Buffer.from([0x1b,0x64,5,0x1d,0x56,0])));
+});

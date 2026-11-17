@@ -112,11 +112,12 @@ test('real worker registers protocol after heartbeat, claims only after empty le
   assert.equal(loaded.writes.length, 1);
 }));
 
-test('legacy nonempty skips service claim; missing protocol RPC warns once and remains legacy only', async () => withWorker(async ({ calls, state, logs, tick }) => {
+test('legacy nonempty skips service claim; missing protocol RPC warns once and remains legacy only', async () => withWorker(async ({ worker, calls, state, logs, tick }) => {
   state.legacyJobs = [{ ...job('information'), payload: { items: [{ name: 'Legacy', quantity: 1 }] } }];
   await tick();
   assert.equal(calls.some(call => call.name === 'print_claim_service_jobs'), false);
   state.missing = true;
+  worker.lastAgentHeartbeatAt = 0;
   await tick(); await tick();
   assert.equal(calls.filter(call => call.name === 'printing_register_service_protocol').length, 2);
   assert.equal(calls.some(call => call.name === 'print_claim_service_jobs'), false);
@@ -139,7 +140,7 @@ test('worker uses its live kitchen layout and defers safely if settings cannot b
     worker.fetchLivePrinterRoutes = async () => ({ byId: new Map(), byDepartment: new Map(), kitchenLayout: { font: 'A', align: 'right', table: { label: 'POSTAZIONE' } } });
     await tick();
     assert.equal(loaded.writes.length, 1);
-    assert.deepEqual(loaded.writes[0].subarray(0, 5), Buffer.from([27, 64, 27, 77, 0]));
+    assert.deepEqual(loaded.writes[0].subarray(0, 9), Buffer.from([27, 64, 29, 80, 203, 203, 27, 77, 0]));
     assert.ok(loaded.writes[0].includes(Buffer.from('POSTAZIONE: 8')));
   });
   await withWorker(async ({ worker, loaded, state, calls, tick }) => {

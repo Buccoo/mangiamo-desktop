@@ -4,6 +4,12 @@ import { context, build } from "esbuild";
 const watchMode = process.argv.includes("--watch");
 
 const targets = [
+  { entryPoints: ["electron/ticketFonts.ts"], outfile: "electron-dist/ticketFonts.cjs" },
+  { entryPoints: ["electron/ticket-raster.ts"], outfile: "electron-dist/ticket-raster.cjs" },
+  { entryPoints: ["electron/printerPaper.ts"], outfile: "electron-dist/printerPaper.cjs" },
+  { entryPoints: ["electron/desktopUpdate.ts"], outfile: "electron-dist/desktopUpdate.cjs" },
+  { entryPoints: ["electron/receiptTicket.ts"], outfile: "electron-dist/receiptTicket.cjs" },
+  { entryPoints: ["electron/kitchenTicket.ts"], outfile: "electron-dist/kitchenTicket.cjs" },
   {
     entryPoints: ["electron/printDelivery.ts"],
     outfile: "electron-dist/printDelivery.cjs",
@@ -21,8 +27,6 @@ const targets = [
     outfile: "electron-dist/preload.cjs",
   },
 ];
-
-targets.push({ entryPoints: ["electron/kitchenTicket.ts"], outfile: "electron-dist/kitchenTicket.cjs" });
 
 const sharedOptions = {
   bundle: false,

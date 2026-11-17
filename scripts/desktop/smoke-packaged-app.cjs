@@ -1,0 +1,14 @@
+const fs=require('node:fs');const crypto=require('node:crypto');const os=require('node:os');const path=require('node:path');const {spawnSync}=require('node:child_process');
+const directory=fs.mkdtempSync(path.join(os.tmpdir(),'mangiamo-desktop-smoke-'));
+const env={...process.env};delete env.ELECTRON_RUN_AS_NODE;
+const executable=path.resolve('dist-desktop/win-unpacked/Mangiamo Desktop.exe');
+const result=spawnSync(executable,['--desktop-startup-smoke-dir='+directory],{env,windowsHide:true,encoding:'utf8',timeout:20000});
+if(result.error||result.status!==0)throw Error('Packaged startup failed: '+(result.error?.message||result.stderr||result.status));
+const proof=JSON.parse(fs.readFileSync(path.join(directory,'startup-proof.json'),'utf8'));
+const expected=require('../../package.json').version;
+if(proof.version!==expected||!proof.isPackaged||!proof.dependenciesLoaded||!proof.rasterFontsLoaded||proof.userDataPath!==directory||proof.bridgeStarted!==false||proof.rendererStarted!==false)throw Error('Invalid packaged startup proof');
+console.log('[packaged-startup] Windows '+proof.version+': main process and dependencies started; no user session, renderer or printing worker opened');
+
+const installer=fs.readFileSync(path.resolve('dist-desktop/Mangiamo-Desktop-Setup.exe'));
+const receipt={schema_version:1,platform:process.platform,arch:process.arch,version:expected,isPackaged:true,dependenciesLoaded:true,rasterFontsLoaded:true,bridgeStarted:false,rendererStarted:false,installer_sha512:crypto.createHash('sha512').update(installer).digest('base64'),installer_size:installer.length};
+fs.writeFileSync('dist-desktop/packaged-startup-proof.json',JSON.stringify(receipt,null,2)+'\n');

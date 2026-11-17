@@ -8,8 +8,14 @@ import type { BrowserWindow } from "electron";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type * as PrintDelivery from "./printDelivery";
 const { LocalPrintJournal, PrintNotSentError, deliverPrintJob } = require("./printDelivery.cjs") as typeof PrintDelivery;
-import type * as KitchenTicket from './kitchenTicket';
-const { renderKitchenTicketCore, buildKitchenEscPos } = require('./kitchenTicket.cjs') as typeof KitchenTicket;
+
+import type * as KitchenTicket from "./kitchenTicket";
+const { renderKitchenTicketCore, buildKitchenEscPos, resolveKitchenPrinterLayout } = require("./kitchenTicket.cjs") as typeof KitchenTicket;
+import type * as TicketFonts from './ticketFonts';
+const { buildPreciseTicket } = require('./ticketFonts.cjs') as typeof TicketFonts;
+
+import type * as ReceiptTicket from "./receiptTicket";
+const { renderNonFiscalReceiptTicket: renderReceiptCore } = require("./receiptTicket.cjs") as typeof ReceiptTicket;
 
 type RuntimeConfig = {
   VITE_SUPABASE_URL: string;
@@ -80,11 +86,12 @@ type LivePrinter = {
 };
 
 type LiveRoutes = {
-  kitchenLayout?: unknown;
   byId: Map<string, LivePrinter>;
   byDepartment: Map<string, LivePrinter>;
   defaultPrinterId: string | null;
   pinPrinterId: string | null;
+  kitchenLayout?: unknown;
+  receiptLayout?: unknown;
 };
 
 type DiscoverPrinter = {
@@ -205,7 +212,8 @@ function sanitizeDeviceName(value: unknown) {
 function sanitizePollMs(value: unknown) {
   const n = Number(value);
   if (!Number.isFinite(n)) return 1000;
-  return Math.max(500, Math.min(10000, Math.trunc(n)));
+  // Older installations persisted a 2500ms pause on top of every network cycle.
+  return Math.max(500, Math.min(1000, Math.trunc(n)));
 }
 
 function sanitizeClaimLimit(value: unknown) {
@@ -332,6 +340,7 @@ function openRawSocket(host: string, port: number, payload: Buffer, timeoutMs = 
   });
 }
 
+
 function wrapText(input: string, width: number) {
   const text = String(input || "").trim();
   if (!text) return [""];
@@ -454,24 +463,21 @@ function serviceTicketHeader(service: NonNullable<ReturnType<typeof serviceTicke
   };
   return [...labels[service.intent], `USCITA ${service.groupId.slice(0, 8)} REV.${service.revision}`];
 }
-
-function renderAnnotatedKitchenTicket(job: JobRow, layout?: unknown) {
-  const service = serviceTicketMetadata(job);
-  const payload = job.payload ?? {};
-  return renderKitchenTicketCore({ ...payload,
-    department: String(payload.department || job.department || "cucina"),
-    created_at: String(payload.created_at || job.created_at || ""),
-  } as KitchenTicket.KitchenTicketPayload, {
-    layout: layout ?? (payload.layout as Record<string, unknown> | undefined)?.kitchen ?? payload.layout,
-    serviceHeadings: service ? serviceTicketHeader(service) : [],
-  });
+function renderAnnotatedKitchenTicket(job: JobRow, liveLayout?: unknown) {
+ const payload=job.payload??{};
+ const snapshot=(payload.layout&&typeof payload.layout==='object'?payload.layout:{}) as Record<string,unknown>;
+ const layout=liveLayout??snapshot.kitchen;
+ const service=serviceTicketMetadata(job);
+ return renderKitchenTicketCore({...payload,department:String(payload.department??job.department??'cucina'),created_at:String(payload.created_at??job.created_at??'')},
+  {jobId:job.id,layout,serviceHeadings:service?serviceTicketHeader(service):undefined});
 }
 
 function renderTicket(job: JobRow, layout?: unknown) {
   serviceTicketMetadata(job);
-  if (isPinSlipJob(job)) return renderPinSlip(job);
-  return renderAnnotatedKitchenTicket(job, layout).text;
+  return isPinSlipJob(job) ? renderPinSlip(job) : renderAnnotatedKitchenTicket(job, layout).text;
 }
+
+
 function formatCurrency(value: unknown) {
   const n = Number(value);
   if (!Number.isFinite(n)) return "EUR 0,00";
@@ -619,7 +625,7 @@ function isBoldLine(line: string) {
   if (!trimmed) return false;
   if (/^tavolo:/i.test(trimmed)) return true;
   if (/^pin:/i.test(trimmed)) return true;
-  if (/^\d+x\s+/i.test(trimmed)) return true;
+  // Product names use normal weight; table/PIN remain prominent.
   return false;
 }
 
@@ -634,10 +640,6 @@ function getLinePrintSize(line: string) {
     // Double width + double height for PIN slip.
     return 0x11;
   }
-  if (/^\d+x\s+/i.test(trimmed)) {
-    // Product rows as large as table rows.
-    return 0x11;
-  }
   // Keep date and other lines in normal size.
   return 0x00;
 }
@@ -645,17 +647,18 @@ function getLinePrintSize(line: string) {
 function buildEscPosPayload(ticketText: string, options?: { align?: "left" | "center"; pinSlip?: boolean }) {
   const ESC = 0x1b;
   const GS = 0x1d;
-  // Keep the working kitchen feed/cut sequence: one line can leave a short
-  // PIN slip behind the cutter, where it cannot be collected or detached.
-  const EXTRA_FEED_LINES = 5;
+  // Leave three extra blank lines below the PIN before cutting the slip.
+  const EXTRA_FEED_LINES = options?.pinSlip ? 8 : 5;
   const lines = ticketText.split(/\r?\n/);
   const alignCenter = options?.pinSlip || options?.align === "center";
   const chunks = [
     Buffer.from([ESC, 0x40]),
-    // Font A makes the PIN readable; ordinary tickets retain Font B.
-    Buffer.from([ESC, 0x4d, options?.pinSlip ? 0x00 : 0x01]),
-    // Slight character spacing improves readability on thermal heads.
-    Buffer.from([ESC, 0x20, 0x02]),
+    // Use the simple, readable Font A for ordinary tickets and PIN slips.
+    Buffer.from([ESC, 0x4d, 0x00]),
+    // Keep 42 Font-A columns within an 80 mm head; no added character spacing.
+    Buffer.from([ESC, 0x20, options?.pinSlip ? 0x02 : 0x00]),
+    // 36 dots leaves breathing room around a normal 24-dot text row.
+    ...(options?.pinSlip ? [] : [Buffer.from([ESC, 0x33, 36])]),
     // Align whole ticket block according to printer paper width.
     Buffer.from([ESC, 0x61, alignCenter ? 0x01 : 0x00]),
   ];
@@ -678,6 +681,7 @@ function buildEscPosPayload(ticketText: string, options?: { align?: "left" | "ce
   if (size !== 0x00) chunks.push(Buffer.from([GS, 0x21, 0x00]));
   if (alignCenter) chunks.push(Buffer.from([ESC, 0x61, 0x00]));
   if (options?.pinSlip) chunks.push(Buffer.from([ESC, 0x4d, 0x01]));
+  else chunks.push(Buffer.from([ESC, 0x32])); // restore default line spacing
   chunks.push(Buffer.from([ESC, 0x64, EXTRA_FEED_LINES]));
   chunks.push(Buffer.from([GS, 0x56, 0x00]));
   return Buffer.concat(chunks);
@@ -837,6 +841,10 @@ async function runWithConcurrency<T>(items: T[], concurrency: number, worker: (i
 }
 
 export class DesktopPrintWorker {
+  private serviceStartPromise: Promise<WorkerPublicState> | null = null;
+  private serviceStartGeneration = 0;
+  private lastAgentHeartbeatAt = 0;
+  private nextReceiptQueue = 0;
   private readonly runtimeConfig: RuntimeConfig;
   private readonly appVersion: string;
   private readonly onMainLog?: (level: "INFO" | "WARN" | "ERROR", message: string) => void;
@@ -862,6 +870,8 @@ export class DesktopPrintWorker {
   private serviceProtocolRpcAvailable = true;
   private serviceProtocolRegistered = false;
   private boundWindow: BrowserWindow | null = null;
+  private updatePaused = false;
+  private readonly updateIdleWaiters = new Set<() => void>();
   private service = {
     running: false,
     processing: false,
@@ -964,13 +974,31 @@ export class DesktopPrintWorker {
     return this.getPublicState();
   }
 
-  async startService() {
+  async startService(): Promise<WorkerPublicState> {
+    if (this.serviceStartPromise) return this.serviceStartPromise;
+    const generation = ++this.serviceStartGeneration;
+    const pending = this.startServiceAfterReview(generation);
+    this.serviceStartPromise = pending;
+    try { return await pending; } finally { if (this.serviceStartPromise === pending) this.serviceStartPromise = null; }
+  }
+
+  private async startServiceAfterReview(generation: number) {
     if (this.service.running) return this.getPublicState();
     await this.ensureSignedIn();
     if (!this.authState.restaurant?.id) {
       throw new Error("Nessun ristorante associato all'account.");
     }
+    const restaurantId = this.authState.restaurant.id;
+    const { data: review, error: reviewError } = await this.ensureSupabaseClient().rpc("print_hold_startup_jobs", {
+      p_restaurant_id: restaurantId, p_consumer_id: this.config.consumerId,
+    });
+    if (reviewError) throw new Error(`Verifica stampe arretrate non disponibile: ${normalizeError(reviewError)}`);
+    if (review?.ok !== true || !Number.isSafeInteger(review.held_count) || review.held_count < 0) throw new Error("Verifica stampe arretrate non confermata. Nessuna stampa avviata.");
+    if (generation !== this.serviceStartGeneration || this.authState.restaurant?.id !== restaurantId) return this.getPublicState();
+    if (review.held_count > 0) this.pushLog("WARN", `${review.held_count} stampe arretrate sospese: controlla la coda in Stampanti.`);
     this.service.running = true;
+    this.lastAgentHeartbeatAt = 0;
+    this.nextReceiptQueue = 0;
     this.service.assignedPrinterId = null;
     this.service.stats = {
       claimed: 0,
@@ -988,7 +1016,27 @@ export class DesktopPrintWorker {
     return this.getPublicState();
   }
 
+  /** Drain the current claim/send/ack cycle without invalidating its generation.
+   * Pausing polling first closes the race between the idle check and quit. */
+  async prepareForUpdate(timeoutMs = 60000): Promise<void> {
+    this.updatePaused = true;
+    if (this.service.timer) { clearTimeout(this.service.timer); this.service.timer = null; }
+    if (!this.service.processing) return;
+    await new Promise<void>((resolve, reject) => {
+      const ready = () => { clearTimeout(timer); this.updateIdleWaiters.delete(ready); resolve(); };
+      const timer = setTimeout(() => { this.updateIdleWaiters.delete(ready); reject(new Error('PRINT_JOBS_ACTIVE')); }, timeoutMs);
+      this.updateIdleWaiters.add(ready);
+    });
+  }
+
+  resumeAfterUpdate() {
+    if (!this.updatePaused) return;
+    this.updatePaused = false;
+    if (this.service.running && !this.service.processing) void this.runTick();
+  }
+
   async stopService() {
+    this.serviceStartGeneration += 1;
     this.service.running = false;
     if (this.service.timer) {
       clearTimeout(this.service.timer);
@@ -1251,6 +1299,7 @@ export class DesktopPrintWorker {
           else this.pushLog("WARN", `Registrazione protocollo servizio fallita: ${normalizeError(protocolError)}`);
         } else this.serviceProtocolRegistered = true;
       }
+
       const nextAssigned =
         String((data as Record<string, unknown> | null)?.printer_id || "").trim() || serverAssigned || null;
       if (this.service.assignedPrinterId !== nextAssigned) {
@@ -1267,6 +1316,7 @@ export class DesktopPrintWorker {
     this.serviceProtocolRpcAvailable = false;
     this.serviceProtocolRegistered = false;
   }
+
 
   private async fetchLivePrinterRoutes(restaurantId: string): Promise<LiveRoutes> {
     const client = this.ensureSupabaseClient();
@@ -1310,9 +1360,10 @@ export class DesktopPrintWorker {
     return {
       byId,
       byDepartment,
+      kitchenLayout: (printing.ticket_layout as Record<string, unknown> | undefined)?.kitchen,
+      receiptLayout: (printing.ticket_layout as Record<string, unknown> | undefined)?.receipt,
       defaultPrinterId: String(printing.default_printer_id || "").trim() || null,
       pinPrinterId: String(pinPrinting.printer_id || "").trim() || null,
-      kitchenLayout: (printing.ticket_layout as Record<string, unknown> | undefined)?.kitchen,
     };
   }
 
@@ -1354,15 +1405,21 @@ export class DesktopPrintWorker {
     return null;
   }
 
-  private async sendToPrinter(job: JobRow, routeOverride: { host: string; port: number } | null, beforeWrite?: () => Promise<void>, kitchenLayout?: unknown) {
+  private async sendToPrinter(job: JobRow, routeOverride: { host: string; port: number } | null, kitchenLayout?: unknown, beforeWrite?: () => Promise<void>) {
     if (serviceTicketMetadata(job) && !beforeWrite) throw new PrintNotSentError("SERVICE_PRINT_RENEWAL_REQUIRED");
     const host = String(routeOverride?.host || "").trim();
     const port = sanitizePrinterPort(routeOverride?.port);
     if (!host) throw new PrintNotSentError("NO_PRINTER_HOST");
-    const layout = kitchenLayout ?? (job.payload?.layout as Record<string, unknown> | undefined)?.kitchen ?? job.payload?.layout;
-    const payload = isPinSlipJob(job)
-      ? buildEscPosPayload(renderPinSlip(job), { pinSlip: true })
-      : Buffer.from(buildKitchenEscPos(renderAnnotatedKitchenTicket(job, layout).lines, layout));
+    const snapshot = (job.payload?.layout ?? {}) as Record<string, unknown>;
+    const chosenLayout = resolveKitchenPrinterLayout(job.payload?.layout_test === true ? snapshot.kitchen : kitchenLayout ?? snapshot.kitchen, host, port);
+    let payload: Buffer;
+    try {
+      if (isPinSlipJob(job)) payload = buildEscPosPayload(renderPinSlip(job), { pinSlip: true });
+      else {
+        const lines = renderAnnotatedKitchenTicket(job, chosenLayout).lines;
+        payload = lines.some(line => line.size_pt != null) ? buildPreciseTicket(lines, chosenLayout) : Buffer.from(buildKitchenEscPos(lines, chosenLayout));
+      }
+    } catch (error) { throw new PrintNotSentError(normalizeError(error)); }
     let lastError: unknown = null;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
@@ -1446,14 +1503,25 @@ export class DesktopPrintWorker {
     this.pushLog(outcome === "sent" ? "INFO" : "ERROR", `Ricevuta ${queue} ${String(job.id).slice(0, 8)}: ${outcome}; verificare uscita carta`);
   }
 
-  private async sendToNonFiscalReceiptPrinter(job: NonFiscalReceiptJobRow) {
+  private async sendToNonFiscalReceiptPrinter(job: NonFiscalReceiptJobRow, liveLayout?: unknown, liveKitchenLayout?: unknown) {
     const payload = (job.payload && typeof job.payload === "object" ? job.payload : {}) as Record<string, unknown>;
     const route = (payload.route && typeof payload.route === "object" ? payload.route : {}) as Record<string, unknown>;
     const host = String(route.host ?? "").trim();
     const port = sanitizePrinterPort(route.port ?? 9100);
     if (!host) throw new PrintNotSentError("NO_PRINTER_HOST");
-    const ticketText = renderNonFiscalReceiptTicket(job);
-    const escPosPayload = buildEscPosPayload(ticketText, { align: "center" });
+    const snapshot = (payload.layout ?? {}) as Record<string, unknown>;
+    const layout = payload.layout_test === true ? snapshot.receipt : liveLayout;
+    const normalized = (require("./receiptTicket.cjs") as typeof ReceiptTicket).normalizeReceiptLayout(layout);
+    {
+      const kitchen=payload.layout_test===true?snapshot.kitchen:liveKitchenLayout;
+      const hardware=resolveKitchenPrinterLayout({...((kitchen&&typeof kitchen==='object')?kitchen:{}),printable_dots:normalized.printable_dots,raster:normalized.raster??{dpi:203,protocol:'gs-v0'}},host,port);
+      normalized.printable_dots=hardware.printable_dots;normalized.raster=hardware.raster;
+    }
+    let escPosPayload:Buffer;
+    try {
+      const result = renderReceiptCore({ ...payload, paid_at: String(payload.paid_at || job.created_at || '') } as ReceiptTicket.NonFiscalReceiptPayload, { layout:normalized });
+      escPosPayload = result.lines.some(line=>line.size_pt!=null)?buildPreciseTicket(result.lines,normalized):Buffer.from(buildKitchenEscPos(result.lines, normalized));
+    } catch(error){throw new PrintNotSentError(normalizeError(error));}
     let lastError: unknown = null;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
@@ -1495,13 +1563,31 @@ export class DesktopPrintWorker {
   }
 
   private async runTick() {
-    if (!this.service.running || this.service.processing) return;
+    if (!this.service.running || this.service.processing || this.updatePaused) return;
+    if (this.service.timer) clearTimeout(this.service.timer);
+    this.service.timer = null;
+    const tickStartedAt = Date.now();
+    const generation = this.serviceStartGeneration;
+    const restaurantId = this.authState.restaurant?.id;
+    const consumerId = this.config.consumerId;
+    const assertCurrentRun = () => {
+      if (!this.service.running || generation !== this.serviceStartGeneration || restaurantId !== this.authState.restaurant?.id || consumerId !== this.config.consumerId) {
+        throw new PrintNotSentError("PRINT_SERVICE_CHANGED");
+      }
+    };
+    let didWork = false;
+    let tickFailed = false;
     this.service.processing = true;
     this.broadcastState();
     try {
       await this.ensureSignedIn();
       if (!this.authState.restaurant?.id) throw new Error("Ristorante non risolto.");
-      await this.heartbeatAgent(true);
+      assertCurrentRun();
+      // Presence is metadata; lease/permission checks still run for every job.
+      if (!this.lastAgentHeartbeatAt || Date.now() - this.lastAgentHeartbeatAt >= 15000) {
+        await this.heartbeatAgent(true);
+        this.lastAgentHeartbeatAt = Date.now();
+      }
       const client = this.ensureSupabaseClient();
       // Reconcile only cloud acknowledgements. Persisted sends are never sent again.
       for (const pending of await this.deliveryJournal.list()) {
@@ -1512,6 +1598,7 @@ export class DesktopPrintWorker {
           ? this.completeReceiptDelivery(pending.queue, pending.jobId, success, errorMessage, meta, pending.consumerId)
           : this.completePrintJob({ id: pending.jobId }, success, errorMessage, meta, pending.consumerId));
       }
+      assertCurrentRun();
       const { data, error } = await client.rpc("print_claim_jobs", {
         p_restaurant_id: this.authState.restaurant.id,
         p_consumer_id: this.config.consumerId,
@@ -1520,20 +1607,21 @@ export class DesktopPrintWorker {
       if (error) throw error;
       let jobs = (Array.isArray(data) ? data : []) as JobRow[];
       if (jobs.length === 0 && this.serviceProtocolRegistered && this.serviceProtocolRpcAvailable) {
+        assertCurrentRun();
         const { data: serviceData, error: serviceError } = await client.rpc("print_claim_service_jobs", {
-          p_consumer_id: this.config.consumerId, p_limit: this.config.claimLimit,
-          p_protocol_version: 1, p_restaurant_id: this.authState.restaurant.id,
+          p_consumer_id: consumerId, p_limit: this.config.claimLimit, p_protocol_version: 1, p_restaurant_id: restaurantId,
         });
+        assertCurrentRun();
         if (serviceError) {
-          if (isMissingRpcError(serviceError, "print_claim_service_jobs")) this.disableServiceProtocol();
-          else throw serviceError;
+          if (isMissingRpcError(serviceError, "print_claim_service_jobs")) this.disableServiceProtocol(); else throw serviceError;
         } else jobs = (Array.isArray(serviceData) ? serviceData : []).map(row => ({ ...row, serviceClaimed: true })) as JobRow[];
       }
+      didWork = jobs.length > 0;
       this.service.stats.claimed += jobs.length;
       if (jobs.length > 0) this.pushLog("INFO", `Claimati ${jobs.length} job`);
 
       let liveRoutes: LiveRoutes | null = null;
-      try {
+      if (jobs.length > 0) try {
         liveRoutes = await this.fetchLivePrinterRoutes(this.authState.restaurant.id);
       } catch (routesError) {
         this.pushLog("WARN", `Risoluzione route live fallita: ${normalizeError(routesError)}`);
@@ -1545,13 +1633,12 @@ export class DesktopPrintWorker {
           const outcome = await deliverPrintJob(this.deliveryJournal, {
             jobId: job.id, restaurantId: this.authState.restaurant.id, consumerId: this.config.consumerId,
           }, async () => {
-            if (!liveRoutes && !isPinSlipJob(job)) throw new PrintNotSentError('KITCHEN_LAYOUT_UNAVAILABLE');
             const service = serviceTicketMetadata(job);
             const renewService = async () => {
+              assertCurrentRun();
               if (!this.serviceProtocolRpcAvailable) throw new PrintNotSentError("SERVICE_PRINT_RENEWAL_REQUIRED");
-              const { data: renewed, error: renewError } = await client.rpc("print_renew_service_claim", {
-                p_consumer_id: this.config.consumerId, p_job_id: job.id, p_protocol_version: 1,
-              });
+              const { data: renewed, error: renewError } = await client.rpc("print_renew_service_claim", { p_consumer_id: consumerId, p_job_id: job.id, p_protocol_version: 1 });
+              assertCurrentRun();
               if (renewError) {
                 if (isMissingRpcError(renewError, "print_renew_service_claim")) this.disableServiceProtocol();
                 throw new PrintNotSentError(normalizeError(renewError));
@@ -1559,10 +1646,12 @@ export class DesktopPrintWorker {
               if (!renewed || renewed.ok !== true || !Number.isFinite(renewed.lease_seconds) || renewed.lease_seconds <= 0) throw new PrintNotSentError("SERVICE_PRINT_RENEWAL_REQUIRED");
             };
             if (!service) {
-              const { error: renewError } = await client.rpc("print_renew_claim", { p_job_id: job.id, p_consumer_id: this.config.consumerId });
+              const { error: renewError } = await client.rpc("print_renew_claim", { p_job_id: job.id, p_consumer_id: consumerId });
               if (renewError) throw new PrintNotSentError(normalizeError(renewError));
             }
-            await this.sendToPrinter(job, route, service ? renewService : undefined, liveRoutes?.kitchenLayout);
+            assertCurrentRun();
+            if (!isPinSlipJob(job) && !liveRoutes) throw new PrintNotSentError("KITCHEN_LAYOUT_UNAVAILABLE");
+            await this.sendToPrinter(job, route, liveRoutes?.kitchenLayout, service ? renewService : undefined);
           }, (success, errorMessage, meta) => this.completePrintJob(job, success, errorMessage, meta));
           if (outcome === "sent") {
             this.service.stats.printed += 1;
@@ -1579,7 +1668,16 @@ export class DesktopPrintWorker {
         }
       }
 
-      if (this.physicalReceiptRpcAvailable) {
+      assertCurrentRun();
+      // Check one receipt queue per cycle, rotating fairly. Never preclaim batches
+      // or overlap physical operations while another lease is being delivered.
+      const receiptQueues = [
+        this.physicalReceiptRpcAvailable ? "physical" : null,
+        this.nonFiscalReceiptRpcAvailable ? "non_fiscal" : null,
+        this.fiscalReceiptRpcAvailable ? "fiscal" : null,
+      ].filter(Boolean);
+      const receiptQueue = receiptQueues.length ? receiptQueues[this.nextReceiptQueue++ % receiptQueues.length] : null;
+      if (receiptQueue === "physical") {
         try {
           const { data: physicalData, error: physicalError } = await client.rpc("physical_receipt_claim_jobs", {
             p_restaurant_id: this.authState.restaurant.id,
@@ -1596,6 +1694,7 @@ export class DesktopPrintWorker {
             }
           } else {
             const physicalJobs = (Array.isArray(physicalData) ? physicalData : []) as PhysicalReceiptJobRow[];
+            didWork ||= physicalJobs.length > 0;
             this.service.stats.claimed += physicalJobs.length;
             if (physicalJobs.length > 0) {
               this.pushLog("INFO", `Claimati ${physicalJobs.length} job RT fisico`);
@@ -1603,7 +1702,7 @@ export class DesktopPrintWorker {
 
             for (const job of physicalJobs) {
               try {
-                await this.deliverReceipt("physical", job, () => this.sendToPhysicalReceiptDevice(job));
+                await this.deliverReceipt("physical", job, () => { assertCurrentRun(); return this.sendToPhysicalReceiptDevice(job); });
               } catch (jobError) {
                 const message = normalizeError(jobError);
                 this.service.stats.failed += 1;
@@ -1613,11 +1712,12 @@ export class DesktopPrintWorker {
             }
           }
         } catch (physicalTickError) {
+          tickFailed = true;
           this.pushLog("ERROR", `Tick RT fisico: ${normalizeError(physicalTickError)}`);
         }
       }
 
-      if (this.nonFiscalReceiptRpcAvailable) {
+      if (receiptQueue === "non_fiscal") {
         try {
           const { data: nfrData, error: nfrError } = await client.rpc("non_fiscal_receipt_claim_jobs", {
             p_restaurant_id: this.authState.restaurant.id,
@@ -1634,14 +1734,22 @@ export class DesktopPrintWorker {
             }
           } else {
             const nfrJobs = (Array.isArray(nfrData) ? nfrData : []) as NonFiscalReceiptJobRow[];
+            didWork ||= nfrJobs.length > 0;
             this.service.stats.claimed += nfrJobs.length;
             if (nfrJobs.length > 0) {
               this.pushLog("INFO", `Claimati ${nfrJobs.length} job scontrino non fiscale`);
+              try {
+                // Fetch only when paper is needed; do not cache edited layouts.
+                liveRoutes = await this.fetchLivePrinterRoutes(this.authState.restaurant.id);
+              } catch (routesError) {
+                liveRoutes = null;
+                this.pushLog("WARN", `Risoluzione route ricevuta fallita: ${normalizeError(routesError)}`);
+              }
             }
 
             for (const job of nfrJobs) {
               try {
-                await this.deliverReceipt("non_fiscal", job, () => this.sendToNonFiscalReceiptPrinter(job));
+                await this.deliverReceipt("non_fiscal", job, () => { assertCurrentRun(); if (!liveRoutes) throw new PrintNotSentError("RECEIPT_LAYOUT_UNAVAILABLE"); return this.sendToNonFiscalReceiptPrinter(job, liveRoutes.receiptLayout, liveRoutes.kitchenLayout); });
               } catch (jobError) {
                 const message = normalizeError(jobError);
                 this.service.stats.failed += 1;
@@ -1651,11 +1759,12 @@ export class DesktopPrintWorker {
             }
           }
         } catch (nfrTickError) {
+          tickFailed = true;
           this.pushLog("ERROR", `Tick scontrino non fiscale: ${normalizeError(nfrTickError)}`);
         }
       }
 
-      if (this.fiscalReceiptRpcAvailable) {
+      if (receiptQueue === "fiscal") {
         try {
           const { data: fiscalData, error: fiscalError } = await client.rpc("fiscal_receipt_print_claim_jobs", {
             p_restaurant_id: this.authState.restaurant.id,
@@ -1672,6 +1781,7 @@ export class DesktopPrintWorker {
             }
           } else {
             const fiscalJobs = (Array.isArray(fiscalData) ? fiscalData : []) as FiscalReceiptPrintJobRow[];
+            didWork ||= fiscalJobs.length > 0;
             this.service.stats.claimed += fiscalJobs.length;
             if (fiscalJobs.length > 0) {
               this.pushLog("INFO", `Claimati ${fiscalJobs.length} job scontrino fiscale`);
@@ -1679,7 +1789,7 @@ export class DesktopPrintWorker {
 
             for (const job of fiscalJobs) {
               try {
-                await this.deliverReceipt("fiscal", job, () => this.sendToFiscalReceiptPrinter(job));
+                await this.deliverReceipt("fiscal", job, () => { assertCurrentRun(); return this.sendToFiscalReceiptPrinter(job); });
               } catch (jobError) {
                 const message = normalizeError(jobError);
                 this.service.stats.failed += 1;
@@ -1689,6 +1799,7 @@ export class DesktopPrintWorker {
             }
           }
         } catch (fiscalTickError) {
+          tickFailed = true;
           this.pushLog("ERROR", `Tick scontrino fiscale: ${normalizeError(fiscalTickError)}`);
         }
       }
@@ -1696,16 +1807,19 @@ export class DesktopPrintWorker {
       this.service.stats.lastRunAt = new Date().toISOString();
       this.service.stats.lastError = null;
     } catch (error) {
+      tickFailed = true;
       const message = normalizeError(error);
       this.service.stats.lastError = message;
       this.pushLog("ERROR", `Tick error: ${message}`);
     } finally {
       this.service.processing = false;
+      for (const ready of this.updateIdleWaiters) ready();
       this.broadcastState();
-      if (this.service.running) {
+      if (this.service.running && !this.updatePaused) {
+        const delay = tickFailed ? this.config.pollMs : didWork ? 0 : Math.max(0, this.config.pollMs - (Date.now() - tickStartedAt));
         this.service.timer = setTimeout(() => {
           void this.runTick();
-        }, this.config.pollMs);
+        }, delay);
       }
     }
   }

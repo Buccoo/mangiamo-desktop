@@ -136,6 +136,8 @@ contextBridge.exposeInMainWorld("desktopShell", {
         "desktop:printer:discover",
         Number.isFinite(Number(timeoutMs)) ? { timeoutMs: Number(timeoutMs) } : {},
       ),
+    detectPaper: (config: { host: string; port?: number }) =>
+      ipcRenderer.invoke("desktop:printer:detect-paper", config || {}),
     discoverRt: (timeoutMs?: number) =>
       ipcRenderer.invoke(
         "desktop:printer:discover-rt",
