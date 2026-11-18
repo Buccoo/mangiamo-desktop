@@ -391,7 +391,9 @@ export function renderNonFiscalReceiptTicket(
   previewField = 'footer';
   if (layout.footer.visible) {
     if (layout.footer.custom_text.trim()) {
-      addLine(centerText(layout.footer.custom_text.trim(), width), "footer");
+      for (const line of layout.footer.custom_text.trim().split(/\r\n|\r|\n/)) {
+        addLine(centerText(line.trim(), width), "footer");
+      }
     }
     if (layout.footer.show_non_fiscal_label) {
       addLine(centerText("*** NON FISCALE ***", width), "footer");
