@@ -1,5 +1,7 @@
 ﻿import { app, BrowserWindow, ipcMain, Menu, shell } from "electron";
 import { autoUpdater } from "electron-updater";
+import { dialog } from "electron";
+const { assertDesktopVersion, recordExpectedDesktopVersion } = require('./desktopVersionGuard.cjs') as typeof import('./desktopVersionGuard');
 import fs from "node:fs";
 import https from "node:https";
 import path from "node:path";
@@ -101,7 +103,10 @@ const desktopUpdateActions = createDesktopUpdateActions({
     if (desktopUpdateCheckPromise) await desktopUpdateCheckPromise;
     return autoUpdater.downloadUpdate();
   },
-  install: (silent, forceRunAfter) => autoUpdater.quitAndInstall(silent, forceRunAfter),
+  install: (silent, forceRunAfter) => {
+    recordExpectedDesktopVersion(app.getPath('userData'),app.getVersion(),String(desktopUpdateInfo?.version??''));
+    autoUpdater.quitAndInstall(silent, forceRunAfter);
+  },
   schedule: (callback) => { setTimeout(callback, 200); },
   onError: (error) => {
     const message = error instanceof Error ? error.message : String(error);
@@ -982,7 +987,9 @@ function setupAutoUpdaterScaffold() {
   if (!desktopAutoUpdateEnabled) return;
 
   autoUpdater.autoDownload = false;
-  autoUpdater.autoInstallOnAppQuit = true;
+  // Installation must go through the explicit action: drain claims and persist
+  // the target version before closing. A normal quit must not bypass those steps.
+  autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.autoRunAppAfterInstall = true;
   autoUpdater.logger = null;
 
@@ -1076,7 +1083,9 @@ function setupAutoUpdaterScaffold() {
   });
 
   autoUpdater.on("error", (error) => {
+    const wasInstalling=desktopUpdateActions.installing;
     desktopUpdateActions.resetInstall();
+    if(wasInstalling) printWorker?.resumeAfterUpdate();
     desktopUpdateCheckInProgress = false;
     const message = error instanceof Error ? error.message : String(error);
     log("WARN", "desktop updater error", message);
@@ -1316,6 +1325,8 @@ app.on("open-url", (event, url) => {
 app
   .whenReady()
   .then(async () => {
+    // quit() is asynchronous: a process without the lock must never start a bridge.
+    if (!gotLock) return;
     if (startupSmokeDirectory) {
       const {buildPreciseTicket}=require('./ticketFonts.cjs') as typeof import('./ticketFonts');
       const image=buildPreciseTicket([{text:'Formato 中文 🍣 13,5 pt',size_pt:13.5,font:'A',type:'item'}],{printable_dots:576,raster:{dpi:203,protocol:'gs-v0'}});
@@ -1325,6 +1336,14 @@ app
       return;
     }
 
+    if (app.isPackaged) {
+      try { assertDesktopVersion(app.getPath('userData'),app.getVersion()); }
+      catch(error) {
+        dialog.showErrorBox('Aggiornamento Desktop da completare',
+          `Questa versione non può avviare il servizio stampa. Completa l'installazione del Desktop aggiornato. Le impostazioni e i layout sono conservati.\n\n${error instanceof Error?error.message:String(error)}`);
+        app.quit();return;
+      }
+    }
     app.setPath("crashDumps", path.join(app.getPath("userData"), "crash-dumps"));
     log("INFO", "desktop app starting", {
       isPackaged: app.isPackaged,

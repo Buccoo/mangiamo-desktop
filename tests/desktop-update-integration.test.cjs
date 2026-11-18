@@ -7,9 +7,10 @@ const vm = require('node:vm');
 
 // Run the actual compiled main-process updater and IPC actions without starting
 // Electron, touching a real installation or connecting the printing worker.
-function mainUpdater({ enabled = true } = {}) {
+function mainUpdater({ enabled = true, startup } = {}) {
   const updater = new EventEmitter();
   const calls = { checks: 0, downloads: 0, installs: [], scheduled: [], feeds: [], paperQueries: [] };
+  const fakeApp=Object.assign(new EventEmitter(),{isPackaged:true,getPath:()=>__dirname,getVersion:()=> '1.5.62',requestSingleInstanceLock:()=>startup?.lock??true,quit:()=>{calls.quits=(calls.quits??0)+1;},whenReady:()=>Promise.resolve()});
   updater.setFeedURL = ({ url }) => calls.feeds.push(url);
   updater.checkForUpdates = async () => {
     calls.checks++;
@@ -31,7 +32,8 @@ function mainUpdater({ enabled = true } = {}) {
       env: { MANGIAMO_DESKTOP_ENABLE_AUTO_UPDATE: enabled ? '1' : '0', PUBLIC_APP_URL: 'https://manager.mangiamo.app' } },
     setTimeout: callback => calls.scheduled.push(callback),
     require(name) {
-      if (name === 'electron') return { app: { isPackaged: true, getPath: () => __dirname } };
+      if (name === 'electron') return {app:fakeApp,dialog:{showErrorBox:()=>{calls.dialogs=(calls.dialogs??0)+1;}}};
+      if (name === './desktopVersionGuard.cjs') return {assertDesktopVersion(){calls.versionChecks=(calls.versionChecks??0)+1;if(startup?.reject)throw Error('DESKTOP_UPDATE_INCOMPLETE');},recordExpectedDesktopVersion:(...args)=>{calls.checkpoints??=[];calls.checkpoints.push(args);if(calls.checkpointFailure)throw Error('CHECKPOINT_WRITE_FAILED');}};
       if (name === 'electron-updater') return { autoUpdater: updater };
       if (name === './desktopUpdate.cjs') return require('../electron-dist/desktopUpdate.cjs');
       if (name === './printWorker.cjs') return {};
@@ -48,11 +50,17 @@ function mainUpdater({ enabled = true } = {}) {
   `, context);
   const api = context.module.exports;
   api.setupAutoUpdaterScaffold();
+  if(startup){
+    const end=main.lastIndexOf('\n',main.indexOf('app.setPath("crashDumps"',boundary));
+    assert.ok(end>boundary);
+    vm.runInNewContext(main.slice(boundary,end)+'module.exports.reachedBridge=true;});',context);
+  }
   return { api, updater, calls };
 }
 
 test('actual main process preserves a verified download across polling and forces silent relaunch', async () => {
-  const { api, calls } = mainUpdater();
+  const { api, calls, updater } = mainUpdater();
+  assert.equal(updater.autoInstallOnAppQuit,false,'normal quit must not bypass the checkpoint');
   await api.checkForUpdatesWithFeedFallback();
   assert.equal((await api.desktopUpdateActions.download()).ok, true);
   await api.checkForUpdatesWithFeedFallback();
@@ -60,6 +68,32 @@ test('actual main process preserves a verified download across polling and force
   api.desktopUpdateActions.install();
   calls.scheduled[0]();
   assert.deepEqual(calls.installs, [[true, true]]);
+  assert.equal(calls.checkpoints[0][2],'99.0.0');
+});
+
+test('actual ready handler cannot start the bridge without the instance lock or after an incomplete update',async()=>{
+ for(const startup of [{lock:false},{lock:true,reject:true}]){
+  const {api,calls}=mainUpdater({startup});await Promise.resolve();await Promise.resolve();
+  assert.equal(api.reachedBridge,undefined);assert.equal(calls.quits,1);
+  assert.equal(calls.versionChecks??0,startup.lock?1:0);
+  assert.equal(calls.dialogs??0,startup.reject?1:0);
+ }
+ const {api}=mainUpdater({startup:{lock:true}});await Promise.resolve();await Promise.resolve();assert.equal(api.reachedBridge,true);
+});
+
+test('an asynchronous updater installation error resumes the paused printing worker',async()=>{
+ const {api,updater,calls}=mainUpdater();let resumed=0;
+ api.setWorker({getPublicState:()=>({service:{processing:false}}),prepareForUpdate:async()=>{},resumeAfterUpdate:()=>resumed++});
+ updater.emit('update-downloaded',{version:'99.0.0'});await api.installDesktopUpdateSafely();calls.scheduled[0]();
+ updater.emit('error',new Error('NSIS_INSTALL_FAILED'));assert.equal(resumed,1);
+});
+
+test('a failed version checkpoint never launches the installer and resumes printing',async()=>{
+ const {api,updater,calls}=mainUpdater();let resumed=0;
+ api.setWorker({getPublicState:()=>({service:{processing:false}}),prepareForUpdate:async()=>{},resumeAfterUpdate:()=>resumed++});
+ updater.emit('update-downloaded',{version:'99.0.0'});calls.checkpointFailure=true;
+ await api.installDesktopUpdateSafely();calls.scheduled[0]();
+ assert.equal(calls.installs.length,0);assert.equal(resumed,1);
 });
 
 test('Windows fallback uses the verified native pipeline, including install and restart', async () => {
