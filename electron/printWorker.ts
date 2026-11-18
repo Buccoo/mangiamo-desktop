@@ -1515,7 +1515,7 @@ export class DesktopPrintWorker {
     {
       const kitchen=payload.layout_test===true?snapshot.kitchen:liveKitchenLayout;
       const hardware=resolveKitchenPrinterLayout({...((kitchen&&typeof kitchen==='object')?kitchen:{}),printable_dots:normalized.printable_dots,raster:normalized.raster??{dpi:203,protocol:'gs-v0'}},host,port);
-      normalized.printable_dots=hardware.printable_dots;normalized.raster=hardware.raster;
+      normalized.native_profile=hardware.native_profile;normalized.printable_dots=hardware.printable_dots;normalized.raster=hardware.raster;
     }
     let escPosPayload:Buffer;
     try {

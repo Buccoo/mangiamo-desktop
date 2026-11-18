@@ -78,6 +78,15 @@ test('a sample print remains identifiable on paper with the optional header hidd
   assert.match(bytes.toString(), /DATI DI ESEMPIO/);
 });
 
+test('fast receipts use CUSTOM cells and absolute right-edge prices on the selected endpoint', async () => {
+  const payload = { restaurant_name: 'Fixture', total_amount: 39.8, route: { host: 'fixture-only' } };
+  const layout = { render_mode: 'native', width: 32, font: 'B', printable_dots: 576, printer_profiles: { 'fixture-only:9100': 'custom-kube-ii' } };
+  const bytes = await print({ payload }, layout, 'sendToNonFiscalReceiptPrinter');
+  assert.ok(bytes.includes(Buffer.from([27,193,1])), 'select documented CUSTOM CPI');
+  const price = 'EUR 39,80', position = 576 - 8 - price.length * 10;
+  assert.ok(bytes.includes(Buffer.concat([Buffer.from([27,36,position & 255,position >> 8]),Buffer.from(price)])), 'price ends at the printable right margin');
+});
+
 test('native-selected receipt extras with accents or Chinese use the exact shared graphic pixels', async () => {
   const receipt=require('../electron-dist/receiptTicket.cjs'),fonts=require('../electron-dist/ticketFonts.cjs');
   for(const name of ['Tiramisù','中文甜点']){

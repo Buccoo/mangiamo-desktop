@@ -1,9 +1,11 @@
+const { ticketFontMetrics } = require('./kitchenTicket.cjs') as typeof import('./kitchenTicket');
 import type { AnnotatedLine, EscPosFont, TicketRenderMode } from './kitchenTicket';
 export function receiptUsesRaster(layout: Pick<ReceiptLayoutConfig, 'render_mode' | 'sizes_pt'>) {
   return layout.render_mode === 'raster' || layout.render_mode !== 'native' && Object.keys(layout.sizes_pt ?? {}).length > 0;
 }
 export interface ReceiptLayoutConfig {
   render_mode?: TicketRenderMode;
+  native_profile?: 'custom-kube-ii';
   header: {
     visible: boolean;
     show_restaurant_name: boolean;
@@ -87,6 +89,7 @@ export function normalizeReceiptLayout(raw: unknown): ReceiptLayoutConfig {
   const raster=r.raster&&typeof r.raster==='object'?r.raster as Record<string,unknown>:null;
 
   return {
+    ...(r.native_profile === 'custom-kube-ii' ? { native_profile: 'custom-kube-ii' as const } : {}),
     ...(r.render_mode === 'native' || r.render_mode === 'raster' ? { render_mode: r.render_mode } : {}),
     ...(Object.keys(sizes).length?{sizes_pt:sizes}:{}),
     ...(r.printable_dots!=null||Object.keys(sizes).length||r.render_mode==='raster'?{printable_dots:([360,384,512,576,960].includes(Number(r.printable_dots))?Number(r.printable_dots):Number(r.width)===32?384:Number(r.width)===80?960:576) as 360|384|512|576|960}:{}),
@@ -227,8 +230,9 @@ export function renderNonFiscalReceiptTicket(
   options?: { layout?: unknown },
 ): NonFiscalReceiptRenderResult {
   const layout = normalizeReceiptLayout(options?.layout);
-  // Old column counts must still fit when paper is narrowed.
-  const width = Math.min(layout.width, Math.floor((layout.printable_dots ?? (layout.width === 32 ? 384 : layout.width === 80 ? 960 : 576)) / (layout.font === 'A' ? 12 : 9)));
+  const metric = ticketFontMetrics(layout, layout.font);
+  const dots = layout.printable_dots;
+  const width = dots != null ? Math.max(1, Math.floor((dots - 8) / metric.cell)) : layout.width;
   const sepChar = layout.separator_char;
   const sep = sepChar.repeat(width);
   const sepDouble = "=".repeat(width);
@@ -266,14 +270,14 @@ export function renderNonFiscalReceiptTicket(
     text = toStr(text);
     const section=pointSection??(type==='header'||type==='table'||type==='timestamp'||type==='footer'?type:'items');
     if(rasterMode){lines.push({text:text.trim(),type,size:'normal',bold,align:['header','table','timestamp','footer'].includes(section)?'center':'left',font:layout.font,size_pt:layout.sizes_pt?.[section]??(layout.font==='B'?9:12),right_text,preview_field:type==='blank'||type==='separator'?undefined:previewField,section:section==='total'?'items':section});return;}
-    for (const chunk of wrapReceiptLine(text, width)) lines.push({ text: chunk, type, size: "normal", bold: false, align: "left", preview_field:type==='blank'||type==='separator'?undefined:previewField });
+    for (const chunk of wrapReceiptLine(text, width)) lines.push({ text: chunk, type, size: "normal", bold, align: "left", font: layout.font, cell_dots: metric.cell, glyph_dots: metric.glyph, ...(right_text ? { right_text } : {}), preview_field:type==='blank'||type==='separator'?undefined:previewField });
   };
   const addAmount=(label:string,value:string)=> {
     const safeLabel = toStr(label), safeValue = toStr(value);
     if (rasterMode) { addLine(safeLabel, 'item', 'items', false, safeValue); return; }
     const labelWidth = Math.max(1, width - safeValue.length - 1);
     const chunks = wrapReceiptLine(safeLabel, labelWidth);
-    chunks.forEach((chunk, index) => addLine(index === chunks.length - 1 ? padRow(chunk, safeValue, width) : chunk, 'item'));
+    chunks.forEach((chunk, index) => addLine(chunk, 'item', 'items', false, index === chunks.length - 1 ? safeValue : undefined));
   };
   const addSep = (char?: string) => addLine((char ?? sepChar).repeat(width), "separator");
   const addBlank = () => addLine("", "blank");
@@ -369,7 +373,7 @@ export function renderNonFiscalReceiptTicket(
   previewField = 'total';
   if (layout.total.visible) {
     if(rasterMode)addLine("TOTALE",'item','total',true,formatCurrency(totalAmount));
-    else lines.push({ text: padRow("TOTALE", formatCurrency(totalAmount), width), type: "item", size: "normal", bold: true, preview_field: previewField });
+    else addLine("TOTALE", "item", "total", true, formatCurrency(totalAmount));
     previewField = 'payment';
   if (layout.total.show_payment_method) {
       addAmount("Pagamento", paymentLabel);
