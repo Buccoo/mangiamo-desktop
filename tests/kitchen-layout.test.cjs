@@ -60,6 +60,24 @@ test('receipt extras reach the actual native socket with quantities, prices and 
   assert.equal(bytes.toString('latin1').split('\x1dV\x00').length-1,1);
 });
 
+test('paid lunch tariff quantities, covers and partial residue reach the native transport without unpaid desserts', async () => {
+  const payload = { restaurant_name: 'Fixture', table_number: '23', payment_scope: 'selected_items', ayce_total: 55.6, cover_total: 16, extras_total: 2.6, total_amount: 74.2, route: { host: 'fixture-only' },
+    receipt_breakdown: { version: 1, ayce_items: [{ id: 'standard', name: 'Menu pranzo', quantity: 2, unit_price: 17.9, line_total: 35.8 }, { id: 'baby', name: 'Baby', quantity: 2, unit_price: 9.9, line_total: 19.8 }, { id: 'cover_only', name: 'Solo coperto', quantity: 1, unit_price: 0, line_total: 0 }], cover_item: { name: 'Coperto', quantity: 8, unit_price: 2, line_total: 16 }, amount_due_after: 76.9 },
+    extra_items: [{ name: 'ACQUA FRIZZANTE', quantity: 1, unit_price: 2.6, line_total: 2.6 }] };
+  const bytes = await print({ payload }, { render_mode: 'native' }, 'sendToNonFiscalReceiptPrinter');
+  for (const text of ['PAGAMENTO PARZIALE', '2x Menu pranzo', '2x Baby', '8x Coperto', 'EUR 17,90 cad.', 'EUR 74,20', 'EUR 76,90']) assert.ok(bytes.toString().includes(text), text);
+  assert.doesNotMatch(bytes.toString(), /DORAYAKI|TARTUFO/);
+  assert.equal(bytes.toString('latin1').split('\x1dV\x00').length - 1, 1);
+});
+
+test('a sample print remains identifiable on paper with the optional header hidden', async () => {
+  const layout = { render_mode: 'native', header: { visible: false } };
+  const payload = { layout_test: true, layout: { receipt: layout }, restaurant_name: 'Fixture', total_amount: 61, route: { host: 'fixture-only' } };
+  const bytes = await print({ payload }, layout, 'sendToNonFiscalReceiptPrinter');
+  assert.match(bytes.toString(), /PROVA STAMPA/);
+  assert.match(bytes.toString(), /DATI DI ESEMPIO/);
+});
+
 test('native-selected receipt extras with accents or Chinese use the exact shared graphic pixels', async () => {
   const receipt=require('../electron-dist/receiptTicket.cjs'),fonts=require('../electron-dist/ticketFonts.cjs');
   for(const name of ['Tiramisù','中文甜点']){

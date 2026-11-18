@@ -137,7 +137,16 @@ function wrapReceiptLine(text: string, width: number): string[] {
   }
   rows.push(row); return rows;
 }
+export interface ReceiptBreakdownItem { id?: string; name: string; quantity: number; unit_price: number; line_total: number }
+export interface ReceiptBreakdown {
+  version: 1;
+  ayce_items: ReceiptBreakdownItem[];
+  cover_item?: ReceiptBreakdownItem | null;
+  amount_due_after?: number;
+}
 export interface NonFiscalReceiptPayload {
+  layout_test?: boolean;
+  receipt_breakdown?: ReceiptBreakdown | null;
   restaurant_name?: string;
   table_number?: string | number | null;
   paid_at?: string | null;
@@ -235,13 +244,23 @@ export function renderNonFiscalReceiptTicket(
   const coverTotal = Number(payload.cover_total) || 0;
   const extrasTotal = Number(payload.extras_total) || 0;
   const totalAmount = Number(payload.total_amount) || 0;
+  const breakdown = payload.receipt_breakdown?.version === 1 ? payload.receipt_breakdown : null;
+  const ayceItems = Array.isArray(breakdown?.ayce_items) ? breakdown.ayce_items : [];
+  const coverItem = breakdown?.cover_item;
+  const remaining = breakdown?.amount_due_after;
+  const partial = typeof remaining === 'number' && Number.isFinite(remaining) && remaining > 0;
+  const cents = (value: number) => Math.round(value * 100);
+  const validItem = (item: ReceiptBreakdownItem | null | undefined): item is ReceiptBreakdownItem => Boolean(item &&
+    toStr(item.name).trim() && Number.isSafeInteger(item.quantity) && item.quantity > 0 && item.quantity <= 1000 &&
+    Number.isFinite(item.unit_price) && item.unit_price >= 0 && Number.isFinite(item.line_total) && item.line_total >= 0 &&
+    cents(item.quantity * item.unit_price) === cents(item.line_total));
   const extrasLabel = paymentScope === "roman_split"
     ? (personsAtPayment === 1 ? "1 Quota" : `${personsAtPayment} Quote`)
     : "Extra";
 
   const lines: AnnotatedLine[] = [];
   let previewField: string | undefined = 'header';
-  const content = [restaurantName, tableLabel, layout.header.custom_text, layout.footer.custom_text, ...(payload.extra_items ?? []).map(item => item?.name ?? '')].join(' ');
+  const content = [restaurantName, tableLabel, layout.header.custom_text, layout.footer.custom_text, ...ayceItems.map(item => item?.name ?? ''), ...(payload.extra_items ?? []).map(item => item?.name ?? '')].join(' ');
   const rasterMode=receiptUsesRaster(layout) || /[^\x20-\x7e]/u.test(toStr(content));
   const addLine = (text: string, type: AnnotatedLine["type"], pointSection?:keyof NonNullable<ReceiptLayoutConfig['sizes_pt']>,bold=false,right_text?:string) => {
     text = toStr(text);
@@ -258,6 +277,21 @@ export function renderNonFiscalReceiptTicket(
   };
   const addSep = (char?: string) => addLine((char ?? sepChar).repeat(width), "separator");
   const addBlank = () => addLine("", "blank");
+
+  // These notices belong to the document, including when the editable header
+  // is hidden. A synthetic print must never look like a customer's actual bill.
+  previewField = undefined;
+  if (payload.layout_test === true) {
+    addLine(centerText('*** PROVA STAMPA ***', width), 'header', 'header', true);
+    addLine(centerText('DATI DI ESEMPIO', width), 'header');
+    addSep('=');
+  }
+  if (partial) {
+    addLine(centerText('PAGAMENTO PARZIALE', width), 'header', 'header', true);
+    addLine(centerText('Solo voci pagate', width), 'header');
+    addSep();
+  }
+  previewField = 'header';
 
   // Header
   if (layout.header.visible) {
@@ -289,8 +323,14 @@ export function renderNonFiscalReceiptTicket(
   // Items breakdown
   let hasItems = false;
   previewField = 'ayce';
-  if (layout.items.show_ayce && ayceTotal > 0) {
-    addAmount("AYCE", formatCurrency(ayceTotal));
+  const detailedAyce = paymentScope !== 'roman_split' && ayceItems.length > 0 && ayceItems.every(validItem) &&
+    ayceItems.reduce((total, item) => total + cents(item.line_total), 0) === cents(ayceTotal);
+  if (layout.items.show_ayce && (ayceTotal > 0 || detailedAyce)) {
+    if (detailedAyce) for (const item of ayceItems) {
+      addAmount(`${item.quantity}x ${toStr(item.name).trim()}`, formatCurrency(item.line_total));
+      if (item.quantity > 1) addLine(`${formatCurrency(item.unit_price)} cad.`, 'item_sub');
+    }
+    else addAmount(paymentScope === 'roman_split' ? 'Quota menu AYCE' : 'AYCE', formatCurrency(ayceTotal));
     hasItems = true;
   }
   previewField = 'extras';
@@ -312,7 +352,10 @@ export function renderNonFiscalReceiptTicket(
   }
   previewField = 'cover';
   if (layout.items.show_cover && coverTotal > 0) {
-    addAmount("Coperto", formatCurrency(coverTotal));
+    if (validItem(coverItem) && cents(coverItem.line_total) === cents(coverTotal)) {
+      addAmount(`${coverItem.quantity}x Coperto`, formatCurrency(coverTotal));
+      if (coverItem.quantity > 1) addLine(`${formatCurrency(coverItem.unit_price)} cad.`, 'item_sub');
+    } else addAmount("Coperto", formatCurrency(coverTotal));
     hasItems = true;
   }
   if (hasItems) addSep();
@@ -332,6 +375,12 @@ export function renderNonFiscalReceiptTicket(
       addAmount("Pagamento", paymentLabel);
     }
     addSep("=");
+  }
+
+  if (partial) {
+    previewField = undefined;
+    addAmount('Residuo dopo pagamento', formatCurrency(remaining));
+    addSep();
   }
 
   // Footer
