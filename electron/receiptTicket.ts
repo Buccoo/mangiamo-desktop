@@ -218,7 +218,8 @@ export function renderNonFiscalReceiptTicket(
   options?: { layout?: unknown },
 ): NonFiscalReceiptRenderResult {
   const layout = normalizeReceiptLayout(options?.layout);
-  const width = layout.width;
+  // Old column counts must still fit when paper is narrowed.
+  const width = Math.min(layout.width, Math.floor((layout.printable_dots ?? (layout.width === 32 ? 384 : layout.width === 80 ? 960 : 576)) / (layout.font === 'A' ? 12 : 9)));
   const sepChar = layout.separator_char;
   const sep = sepChar.repeat(width);
   const sepDouble = "=".repeat(width);

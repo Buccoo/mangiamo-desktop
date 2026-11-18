@@ -137,8 +137,12 @@ export function renderRasterTicket(input: RasterLine[], options: { width: number
       if (y+height+Math.ceil(dpi*5/6)>16384) throw Error('TICKET_RASTER_LIMIT');
       const image: RasterRow = { ...source, right_text:rightText||undefined, text: source.type === 'separator' ? source.text : chunk, width, height, y, inkWidth: source.type === 'separator' ? width-16 : measure(chunk,pixels,compact,bold), data: new Uint8Array(stride*height) };
       if (source.type === 'separator') {
-        const center = Math.floor(height/2);
-        for (const ruleY of source.text.startsWith('=') ? [center-2,center+2] : [center]) for (let x=8;x<width-8;x++) image.data[ruleY*stride+(x>>3)] |= 128>>(x&7);
+        // About 0.25 mm: a single dot is too fragile on thermal paper.
+        const stroke = Math.max(2, Math.round(dpi / 100));
+        const center = Math.floor(height / 2), gap = stroke;
+        const starts = source.text.startsWith('=') ? [center - gap - stroke, center + gap] : [center - Math.floor(stroke / 2)];
+        for (const start of starts) for (let ruleY = start; ruleY < start + stroke; ruleY++)
+          for (let x = 8; x < width - 8; x++) image.data[ruleY * stride + (x >> 3)] |= 128 >> (x & 7);
       } else {
         const paint = (text:string,start:number,paintPixels = pixels) => {
         let x = start;

@@ -17,6 +17,26 @@ test('menu symbols and two-column prices keep their pixels and amounts',()=>{
   assert.equal(image.rows.at(-1).right_text,'25,00 €');
 });
 const row = (text, size_pt = 12, extra = {}) => ({ text, size_pt, font: 'A', size: 'normal', bold: false, type: 'item', align: 'left', ...extra });
+
+test('receipt rules have a thermal-safe physical stroke in both preview and print pixels', () => {
+  for (const dpi of [180, 203, 300]) for (const text of ['---', '===']) {
+    const image = raster.renderRasterTicket([row(text, 9, { type: 'separator' })], { width: 576, dpi });
+    const rule = image.rows[0], stride = Math.ceil(rule.width / 8);
+    const inkRows = Array.from({ length: rule.height }, (_, y) => rule.data.slice(y * stride, (y + 1) * stride).some(Boolean));
+    const runs = inkRows.map(value => value ? '1' : '0').join('').match(/1+/g);
+    assert.equal(runs.length, text[0] === '=' ? 2 : 1);
+    assert.ok(runs.every(run => run.length >= Math.max(2, Math.round(dpi / 100))), `single-dot rule at ${dpi} dpi`);
+  }
+});
+
+test('native receipts keep prices inside narrower paper despite a saved 80-column layout', () => {
+  const { renderNonFiscalReceiptTicket } = require('../electron-dist/receiptTicket.cjs');
+  for (const printable_dots of [360, 384, 512, 576]) {
+    const result = renderNonFiscalReceiptTicket({ restaurant_name: 'Test', total_amount: 61 }, { layout: { render_mode: 'native', font: 'A', width: 80, printable_dots } });
+    assert.ok(result.lines.every(line => line.text.length <= Math.floor(printable_dots / 12)));
+    assert.match(result.text, /EUR 61,00/);
+  }
+});
 test('fractional point sizes convert with the selected physical DPI and render deterministically', () => {
   assert.equal(raster.pointsToDots(12, 203), 12 * 203 / 72);
   const a = raster.renderRasterTicket([row('Tavolo: 5', 13.5)], { width: 576, dpi: 203 });
