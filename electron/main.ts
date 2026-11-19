@@ -1,6 +1,6 @@
 ﻿import { app, BrowserWindow, ipcMain, Menu, shell } from "electron";
 import { autoUpdater } from "electron-updater";
-import { dialog } from "electron";
+import { dialog, powerMonitor } from "electron";
 const { assertDesktopVersion, recordExpectedDesktopVersion } = require('./desktopVersionGuard.cjs') as typeof import('./desktopVersionGuard');
 import fs from "node:fs";
 import https from "node:https";
@@ -1365,6 +1365,8 @@ app
       onMainLog: (level, message) => log(level, message),
     });
     await printWorker.init();
+    powerMonitor.on("suspend", () => printWorker?.recordPowerEvent("suspend"));
+    powerMonitor.on("resume", () => printWorker?.recordPowerEvent("resume"));
     await createMainWindow();
     startDesktopAutoUpdatePolling();
 
@@ -1582,14 +1584,26 @@ app.on("window-all-closed", () => {
   }
 });
 
-app.on("before-quit", () => {
+let diagnosticsQuitPending = false;
+let diagnosticsQuitComplete = false;
+app.on("before-quit", (event) => {
   stopDesktopAutoUpdatePolling();
-  if (printWorker) {
-    void printWorker.shutdown();
-  }
+  if (!printWorker || diagnosticsQuitComplete) return;
+  event.preventDefault();
+  if (diagnosticsQuitPending) return;
+  diagnosticsQuitPending = true;
+  const finish = () => {
+    if (diagnosticsQuitComplete) return;
+    diagnosticsQuitComplete = true;
+    app.quit();
+  };
+  // An unexpected shutdown regression must not trap the native installer.
+  const deadline = setTimeout(finish, 1500);
+  void printWorker.shutdown().catch(() => {}).finally(() => { clearTimeout(deadline); finish(); });
 });
 
 app.on("render-process-gone", (_event, webContents, details) => {
+  printWorker?.recordAppError("RENDER_PROCESS_GONE");
   log("ERROR", "app render-process-gone", {
     id: webContents.id,
     url: webContents.getURL(),
@@ -1598,13 +1612,16 @@ app.on("render-process-gone", (_event, webContents, details) => {
 });
 
 app.on("child-process-gone", (_event, details) => {
+  printWorker?.recordAppError("CHILD_PROCESS_GONE");
   log("WARN", "child process gone", details);
 });
 
 process.on("uncaughtException", (error) => {
+  printWorker?.recordAppError("UNCAUGHT_EXCEPTION");
   log("ERROR", "uncaught exception", error.stack || error.message);
 });
 
 process.on("unhandledRejection", (reason) => {
+  printWorker?.recordAppError("UNHANDLED_REJECTION");
   log("ERROR", "unhandled rejection", reason);
 });

@@ -4,10 +4,13 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { performance } from "node:perf_hooks";
 import type { BrowserWindow } from "electron";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type * as PrintDelivery from "./printDelivery";
 const { LocalPrintJournal, PrintNotSentError, deliverPrintJob } = require("./printDelivery.cjs") as typeof PrintDelivery;
+import type * as Diagnostics from "./printDiagnostics";
+const { PrintDiagnostics, classifyDiagnosticError } = require("./printDiagnostics.cjs") as typeof Diagnostics;
 
 import type * as KitchenTicket from "./kitchenTicket";
 const { renderKitchenTicketCore, buildKitchenEscPos, resolveKitchenPrinterLayout } = require("./kitchenTicket.cjs") as typeof KitchenTicket;
@@ -841,6 +844,12 @@ async function runWithConcurrency<T>(items: T[], concurrency: number, worker: (i
 }
 
 export class DesktopPrintWorker {
+  private readonly diagnostics: InstanceType<typeof PrintDiagnostics>;
+  private diagnosticsIdentityTimer: NodeJS.Timeout | null = null;
+  private diagnosticsIdentityPending = false;
+  private lastPollAt: string | null = null;
+  private lastSuccessAt: string | null = null;
+  private identityGeneration = 0;
   private serviceStartPromise: Promise<WorkerPublicState> | null = null;
   private serviceStartGeneration = 0;
   private lastAgentHeartbeatAt = 0;
@@ -892,6 +901,15 @@ export class DesktopPrintWorker {
     this.onMainLog = deps.onMainLog;
     this.configPath = path.join(deps.userDataPath, CONFIG_FILENAME);
     this.deliveryJournal = new LocalPrintJournal(path.join(deps.userDataPath, "desktop-print-delivery-journal.json"));
+    this.diagnostics = new PrintDiagnostics({
+      filename: path.join(deps.userDataPath, "desktop-print-diagnostics.json"),
+      appVersion: deps.appVersion,
+      health: () => ({
+        service_state: this.updatePaused ? "paused" : this.service.processing ? "processing" : this.service.running ? "running" : "stopped",
+        ...(this.lastPollAt ? { last_poll_at: this.lastPollAt } : {}),
+        ...(this.lastSuccessAt ? { last_success_at: this.lastSuccessAt } : {}),
+      }),
+    });
   }
 
   attachWindow(win: BrowserWindow | null) {
@@ -917,6 +935,8 @@ export class DesktopPrintWorker {
   }
 
   async init() {
+    // Disk/network diagnostics never gate the physical bridge startup.
+    void this.diagnostics.start();
     await this.loadPersistedState();
     if (this.config.autoStart && this.savedSession) {
       try {
@@ -925,13 +945,62 @@ export class DesktopPrintWorker {
         this.pushLog("WARN", `Avvio automatico non riuscito: ${normalizeError(error)}`);
       }
     }
+    void this.refreshDiagnosticsIdentity();
+    this.diagnosticsIdentityTimer = setInterval(() => { void this.refreshDiagnosticsIdentity(); }, 15000);
+    this.diagnosticsIdentityTimer.unref?.();
   }
 
   async shutdown() {
-    await this.stopService();
+    if (this.diagnosticsIdentityTimer) clearInterval(this.diagnosticsIdentityTimer);
+    this.diagnosticsIdentityTimer = null;
+    // Presence RPC is best effort; a stalled backend cannot hold app exit open.
+    void this.stopService();
+    await this.diagnostics?.shutdown(1200);
+  }
+
+  recordPowerEvent(type: "suspend" | "resume") { this.recordDiagnostic(type, { phase: "power" }); this.diagnostics?.recordHealth(); }
+
+  recordAppError(code: "UNCAUGHT_EXCEPTION" | "UNHANDLED_REJECTION" | "RENDER_PROCESS_GONE" | "CHILD_PROCESS_GONE") {
+    this.recordDiagnostic("app_error", { phase: "app", error_code: code }, "error");
+  }
+
+  private recordDiagnostic(type: Diagnostics.DiagnosticEventType, details: Diagnostics.DiagnosticDetails = {}, level: Diagnostics.DiagnosticEvent["level"] = "info", scope = this.diagnostics?.captureScope()) {
+    try { this.diagnostics?.record(type, details, level, scope); } catch { /* Never affect printing; never recurse through the logger. */ }
+  }
+
+  private bindDiagnosticsIdentity(client: SupabaseClient) {
+    const userId = this.authState.user?.id;
+    const restaurantId = this.authState.restaurant?.id;
+    const agentId = this.config.consumerId;
+    if (!userId || !restaurantId) return;
+    const uploader: Diagnostics.DiagnosticUploader = async (scope, events, signal) => {
+      const { data, error } = await client.rpc("printing_record_agent_events", {
+        p_restaurant_id: scope.restaurantId, p_agent_id: scope.agentId, p_events: events,
+      }).abortSignal(signal);
+      if (error) throw error;
+      return data;
+    };
+    // The recorder validates the existing agent's owning user. A brand-new stopped
+    // bridge keeps its spool until normal service startup registers the agent.
+    this.diagnostics?.setScope({ userId, restaurantId, agentId }, uploader);
+  }
+
+  private async refreshDiagnosticsIdentity() {
+    if (this.diagnosticsIdentityPending || !this.savedSession || this.service.running || this.service.processing || this.serviceStartPromise) return;
+    this.diagnosticsIdentityPending = true;
+    try {
+      await this.ensureSignedIn();
+      // Never write stopped presence here: it could race an active print heartbeat.
+      // Diagnostics use the existing registered agent without claiming any jobs.
+    } catch { /* Offline diagnostics wait for the existing saved identity to authenticate. */ }
+    finally { this.diagnosticsIdentityPending = false; }
   }
 
   async saveConfig(partial: Partial<WorkerConfig>) {
+    if (partial.consumerId != null && sanitizeConsumerId(partial.consumerId) !== this.config.consumerId) {
+      this.identityGeneration++;
+      this.diagnostics?.setScope(null);
+    }
     this.config = {
       ...this.config,
       ...partial,
@@ -950,6 +1019,19 @@ export class DesktopPrintWorker {
     const snapshot = toSessionSnapshot(rawSession);
     if (!snapshot) throw new Error("SESSION_INVALID");
     if (sameSession(this.savedSession, snapshot)) return this.getPublicState();
+    this.identityGeneration++;
+    // JWT claims only detect a possible account transition; getUser remains authority.
+    let nextUserId: string | null = null;
+    try { nextUserId = JSON.parse(Buffer.from(snapshot.access_token.split(".")[1], "base64url").toString("utf8")).sub || null; } catch { /* Unrecognised tokens must authenticate afresh. */ }
+    if (!nextUserId || (this.authState.user && nextUserId !== this.authState.user.id)) {
+      this.diagnostics?.setScope(null);
+      this.authState.user = null;
+      this.authState.restaurant = null;
+      this.supabase = null;
+      this.lastPollAt = null;
+      this.lastSuccessAt = null;
+      if (this.service.running) await this.stopService();
+    }
     this.savedSession = snapshot;
     await this.persistState();
     this.pushLog("INFO", "Sessione desktop sincronizzata");
@@ -960,10 +1042,15 @@ export class DesktopPrintWorker {
         this.pushLog("WARN", `Auto-start non riuscito: ${normalizeError(error)}`);
       }
     }
+    void this.refreshDiagnosticsIdentity();
     return this.getPublicState();
   }
 
   async clearSession() {
+    this.identityGeneration++;
+    this.diagnostics?.setScope(null);
+    this.lastPollAt = null;
+    this.lastSuccessAt = null;
     this.savedSession = null;
     this.authState.user = null;
     this.authState.restaurant = null;
@@ -997,6 +1084,7 @@ export class DesktopPrintWorker {
     if (generation !== this.serviceStartGeneration || this.authState.restaurant?.id !== restaurantId) return this.getPublicState();
     if (review.held_count > 0) this.pushLog("WARN", `${review.held_count} stampe arretrate sospese: controlla la coda in Stampanti.`);
     this.service.running = true;
+    this.recordDiagnostic("service_start", { phase: "service", service_state: "running" });
     this.lastAgentHeartbeatAt = 0;
     this.nextReceiptQueue = 0;
     this.service.assignedPrinterId = null;
@@ -1019,6 +1107,7 @@ export class DesktopPrintWorker {
   /** Drain the current claim/send/ack cycle without invalidating its generation.
    * Pausing polling first closes the race between the idle check and quit. */
   async prepareForUpdate(timeoutMs = 60000): Promise<void> {
+    if (!this.updatePaused) this.recordDiagnostic("update_pause", { phase: "update", service_state: "paused" });
     this.updatePaused = true;
     if (this.service.timer) { clearTimeout(this.service.timer); this.service.timer = null; }
     if (!this.service.processing) return;
@@ -1032,12 +1121,15 @@ export class DesktopPrintWorker {
   resumeAfterUpdate() {
     if (!this.updatePaused) return;
     this.updatePaused = false;
+    this.recordDiagnostic("update_resume", { phase: "update", service_state: this.service.running ? "running" : "stopped" });
     if (this.service.running && !this.service.processing) void this.runTick();
   }
 
   async stopService() {
+    const wasRunning = this.service.running;
     this.serviceStartGeneration += 1;
     this.service.running = false;
+    if (wasRunning) this.recordDiagnostic("service_stop", { phase: "service", service_state: "stopped" });
     if (this.service.timer) {
       clearTimeout(this.service.timer);
       this.service.timer = null;
@@ -1166,13 +1258,17 @@ export class DesktopPrintWorker {
   }
 
   private async ensureSignedIn() {
+    const generation = this.identityGeneration;
     const client = this.ensureSupabaseClient();
     const { data, error } = await client.auth.getUser();
+    if (generation !== this.identityGeneration) throw new PrintNotSentError("PRINT_SERVICE_CHANGED");
     if (!error && data?.user) {
+      const restaurant = this.authState.user?.id === data.user.id && this.authState.restaurant
+        ? this.authState.restaurant : await this.resolveRestaurantForCurrentUser(data.user.id);
+      if (generation !== this.identityGeneration) throw new PrintNotSentError("PRINT_SERVICE_CHANGED");
       this.authState.user = { id: data.user.id, email: data.user.email ?? null };
-      if (!this.authState.restaurant) {
-        this.authState.restaurant = await this.resolveRestaurantForCurrentUser(data.user.id);
-      }
+      this.authState.restaurant = restaurant;
+      this.bindDiagnosticsIdentity(client);
       return;
     }
 
@@ -1184,12 +1280,16 @@ export class DesktopPrintWorker {
       access_token: this.savedSession.access_token,
       refresh_token: this.savedSession.refresh_token,
     });
+    if (generation !== this.identityGeneration) throw new PrintNotSentError("PRINT_SERVICE_CHANGED");
     if (restoreError || !restored?.user) {
       throw restoreError || new Error("SESSION_INVALID");
     }
 
+    const restaurant = await this.resolveRestaurantForCurrentUser(restored.user.id);
+    if (generation !== this.identityGeneration) throw new PrintNotSentError("PRINT_SERVICE_CHANGED");
     this.authState.user = { id: restored.user.id, email: restored.user.email ?? null };
-    this.authState.restaurant = await this.resolveRestaurantForCurrentUser(restored.user.id);
+    this.authState.restaurant = restaurant;
+    this.bindDiagnosticsIdentity(client);
     const refreshedSnapshot = toSessionSnapshot(restored.session || null);
     if (refreshedSnapshot && !sameSession(this.savedSession, refreshedSnapshot)) {
       this.savedSession = refreshedSnapshot;
@@ -1274,22 +1374,28 @@ export class DesktopPrintWorker {
     if (!this.authState.restaurant?.id) return;
     try {
       const client = this.ensureSupabaseClient();
+      const generation = this.identityGeneration;
+      const restaurantId = this.authState.restaurant.id;
+      const agentId = this.config.consumerId;
       let serverAssigned: string | null = null;
       try {
         serverAssigned = await this.fetchAssignedPrinterId();
       } catch (error) {
         this.pushLog("WARN", `Lettura assegnazione agente fallita: ${normalizeError(error)}`);
       }
+      if (generation !== this.identityGeneration || restaurantId !== this.authState.restaurant?.id || agentId !== this.config.consumerId) return;
 
       const { data, error } = await client.rpc("printing_register_agent", {
-        p_restaurant_id: this.authState.restaurant.id,
-        p_agent_id: this.config.consumerId,
+        p_restaurant_id: restaurantId,
+        p_agent_id: agentId,
         p_printer_id: serverAssigned || this.service.assignedPrinterId || null,
         p_device_name: this.config.deviceName,
         p_app_version: this.appVersion,
         p_is_active: isActive,
       });
       if (error) throw error;
+      if (generation !== this.identityGeneration || restaurantId !== this.authState.restaurant?.id || agentId !== this.config.consumerId) return;
+      this.bindDiagnosticsIdentity(client);
       if (isActive && this.serviceProtocolRpcAvailable) {
         const { error: protocolError } = await client.rpc("printing_register_service_protocol", {
           p_agent_id: this.config.consumerId, p_protocol_version: 1, p_restaurant_id: this.authState.restaurant.id,
@@ -1491,16 +1597,56 @@ export class DesktopPrintWorker {
     if (error) throw error;
   }
 
-  private async deliverReceipt(queue: Exclude<PrintDelivery.PrintQueue, "kitchen">, job: { id: string; delivery_generation?: number }, send: () => Promise<void | string>) {
+  private async deliverReceipt(queue: Exclude<PrintDelivery.PrintQueue, "kitchen">, job: { id: string; delivery_generation?: number; payload?: Record<string, unknown> | null }, send: () => Promise<void | string>) {
     if (!this.authState.restaurant?.id) throw new PrintNotSentError("RESTAURANT_NOT_FOUND");
-    const outcome = await deliverPrintJob(this.deliveryJournal, { queue, jobId: job.id, restaurantId: this.authState.restaurant.id, consumerId: this.config.consumerId, generation: Number(job.delivery_generation) || 0 }, async () => {
+    const route = job.payload?.route && typeof job.payload.route === "object" ? job.payload.route as Record<string, unknown> : {};
+    const target: Diagnostics.DiagnosticDetails = {
+      host: typeof route.host === "string" ? route.host : undefined,
+      port: queue === "physical" ? sanitizePhysicalPort(route.port, normalizePhysicalBrand(route.brand)) : sanitizePrinterPort(route.port),
+    };
+    const outcome = await this.deliverDiagnosed({ queue, jobId: job.id, restaurantId: this.authState.restaurant.id, consumerId: this.config.consumerId, generation: Number(job.delivery_generation) || 0 }, async () => {
       const { error } = await this.ensureSupabaseClient().rpc("print_renew_receipt_claim", { p_queue: queue, p_job_id: job.id, p_consumer_id: this.config.consumerId });
       if (error) throw new PrintNotSentError(normalizeError(error));
       return send();
-    }, (success, errorMessage, meta) => this.completeReceiptDelivery(queue, job.id, success, errorMessage, meta));
+    }, (success, errorMessage, meta) => this.completeReceiptDelivery(queue, job.id, success, errorMessage, meta), target);
     if (outcome === "sent") this.service.stats.printed += 1;
     else this.service.stats.failed += 1;
     this.pushLog(outcome === "sent" ? "INFO" : "ERROR", `Ricevuta ${queue} ${String(job.id).slice(0, 8)}: ${outcome}; verificare uscita carta`);
+  }
+
+  private async deliverDiagnosed(operation: PrintDelivery.PrintOperation, send: () => Promise<void | string>, acknowledge: Parameters<typeof deliverPrintJob>[3], target: Diagnostics.DiagnosticDetails = {}, claim = true) {
+    const scope = this.diagnostics?.captureScope();
+    const startedAt = performance.now();
+    const details: Diagnostics.DiagnosticDetails = { ...target, job_id: operation.jobId, queue: operation.queue || "kitchen" };
+    const duration = () => Math.min(86400000, Math.max(0, Math.trunc(performance.now() - startedAt)));
+    let errorRecorded = false;
+    if (claim) this.recordDiagnostic("job_claim", { ...details, phase: "claim" }, "info", scope);
+    try {
+      const outcome = await deliverPrintJob(this.deliveryJournal, operation, async () => {
+        try {
+          const result = await send();
+          // This means confirmed transport send, never proof that paper emerged.
+          this.recordDiagnostic("job_sent", { ...details, phase: "transport", duration_ms: duration() }, "info", scope);
+          return result;
+        } catch (error) {
+          errorRecorded = true;
+          this.recordDiagnostic("job_error", { ...details, phase: "transport", duration_ms: duration(), error_code: classifyDiagnosticError(error, "transport") }, "error", scope);
+          throw error;
+        }
+      }, async (...args) => {
+        try { await acknowledge(...args); }
+        catch (error) {
+          errorRecorded = true;
+          this.recordDiagnostic("job_error", { ...details, phase: "ack", duration_ms: duration(), error_code: classifyDiagnosticError(error, "ack") }, "error", scope);
+          throw error;
+        }
+      });
+      if (outcome !== "sent" && !errorRecorded) this.recordDiagnostic("job_error", { ...details, phase: "transport", duration_ms: duration(), error_code: outcome === "uncertain" ? "DELIVERY_UNCERTAIN" : "NOT_SENT" }, "error", scope);
+      return outcome;
+    } catch (error) {
+      if (!errorRecorded) this.recordDiagnostic("job_error", { ...details, phase: "diagnostics", duration_ms: duration(), error_code: "DELIVERY_JOURNAL_FAILED" }, "error", scope);
+      throw error;
+    }
   }
 
   private async sendToNonFiscalReceiptPrinter(job: NonFiscalReceiptJobRow, liveLayout?: unknown, liveKitchenLayout?: unknown) {
@@ -1567,6 +1713,9 @@ export class DesktopPrintWorker {
     if (this.service.timer) clearTimeout(this.service.timer);
     this.service.timer = null;
     const tickStartedAt = Date.now();
+    const failedAtStart = this.service.stats.failed;
+    this.lastPollAt = new Date(tickStartedAt).toISOString();
+    let diagnosticScope = this.diagnostics?.captureScope();
     const generation = this.serviceStartGeneration;
     const restaurantId = this.authState.restaurant?.id;
     const consumerId = this.config.consumerId;
@@ -1581,6 +1730,7 @@ export class DesktopPrintWorker {
     this.broadcastState();
     try {
       await this.ensureSignedIn();
+      diagnosticScope = this.diagnostics?.captureScope();
       if (!this.authState.restaurant?.id) throw new Error("Ristorante non risolto.");
       assertCurrentRun();
       // Presence is metadata; lease/permission checks still run for every job.
@@ -1592,11 +1742,11 @@ export class DesktopPrintWorker {
       // Reconcile only cloud acknowledgements. Persisted sends are never sent again.
       for (const pending of await this.deliveryJournal.list()) {
         if (pending.restaurantId !== this.authState.restaurant.id) continue;
-        await deliverPrintJob(this.deliveryJournal, pending, async () => {
+        await this.deliverDiagnosed(pending, async () => {
           throw new Error("Recovery must not send a physical ticket");
         }, (success, errorMessage, meta) => pending.queue && pending.queue !== "kitchen"
           ? this.completeReceiptDelivery(pending.queue, pending.jobId, success, errorMessage, meta, pending.consumerId)
-          : this.completePrintJob({ id: pending.jobId }, success, errorMessage, meta, pending.consumerId));
+          : this.completePrintJob({ id: pending.jobId }, success, errorMessage, meta, pending.consumerId), {}, false);
       }
       assertCurrentRun();
       const { data, error } = await client.rpc("print_claim_jobs", {
@@ -1628,9 +1778,11 @@ export class DesktopPrintWorker {
       }
 
       for (const job of jobs) {
+        let observed = false;
         try {
           const route = this.resolveRouteForJob(job, liveRoutes);
-          const outcome = await deliverPrintJob(this.deliveryJournal, {
+          observed = true;
+          const outcome = await this.deliverDiagnosed({
             jobId: job.id, restaurantId: this.authState.restaurant.id, consumerId: this.config.consumerId,
           }, async () => {
             const service = serviceTicketMetadata(job);
@@ -1652,7 +1804,7 @@ export class DesktopPrintWorker {
             assertCurrentRun();
             if (!isPinSlipJob(job) && !liveRoutes) throw new PrintNotSentError("KITCHEN_LAYOUT_UNAVAILABLE");
             await this.sendToPrinter(job, route, liveRoutes?.kitchenLayout, service ? renewService : undefined);
-          }, (success, errorMessage, meta) => this.completePrintJob(job, success, errorMessage, meta));
+          }, (success, errorMessage, meta) => this.completePrintJob(job, success, errorMessage, meta), { host: route?.host, port: route?.port });
           if (outcome === "sent") {
             this.service.stats.printed += 1;
             this.pushLog("INFO", `Inviato job ${String(job.id).slice(0, 8)} -> ${normalizeDepartment(job.department)} (verificare uscita carta)`);
@@ -1661,6 +1813,10 @@ export class DesktopPrintWorker {
             this.pushLog("ERROR", outcome === "uncertain" ? `Esito incerto job ${String(job.id).slice(0, 8)}: verificare carta prima della ristampa manuale` : `Job ${String(job.id).slice(0, 8)} non inviato; retry server`);
           }
         } catch (jobError) {
+          if (!observed) {
+            this.recordDiagnostic("job_claim", { job_id: job.id, queue: "kitchen", phase: "claim" }, "info", diagnosticScope);
+            this.recordDiagnostic("job_error", { job_id: job.id, queue: "kitchen", phase: "transport", error_code: classifyDiagnosticError(jobError, "transport") }, "error", diagnosticScope);
+          }
           const message = normalizeError(jobError);
           this.service.stats.failed += 1;
           this.pushLog("ERROR", `Conferma sospesa job ${String(job.id).slice(0, 8)}: ${message}. Nessun reinvio automatico.`);
@@ -1713,6 +1869,7 @@ export class DesktopPrintWorker {
           }
         } catch (physicalTickError) {
           tickFailed = true;
+          this.recordDiagnostic("poll_error", { queue: "physical", phase: "poll", error_code: classifyDiagnosticError(physicalTickError) }, "error", diagnosticScope);
           this.pushLog("ERROR", `Tick RT fisico: ${normalizeError(physicalTickError)}`);
         }
       }
@@ -1760,6 +1917,7 @@ export class DesktopPrintWorker {
           }
         } catch (nfrTickError) {
           tickFailed = true;
+          this.recordDiagnostic("poll_error", { queue: "non_fiscal", phase: "poll", error_code: classifyDiagnosticError(nfrTickError) }, "error", diagnosticScope);
           this.pushLog("ERROR", `Tick scontrino non fiscale: ${normalizeError(nfrTickError)}`);
         }
       }
@@ -1800,14 +1958,20 @@ export class DesktopPrintWorker {
           }
         } catch (fiscalTickError) {
           tickFailed = true;
+          this.recordDiagnostic("poll_error", { queue: "fiscal", phase: "poll", error_code: classifyDiagnosticError(fiscalTickError) }, "error", diagnosticScope);
           this.pushLog("ERROR", `Tick scontrino fiscale: ${normalizeError(fiscalTickError)}`);
         }
       }
 
       this.service.stats.lastRunAt = new Date().toISOString();
-      this.service.stats.lastError = null;
+      tickFailed ||= this.service.stats.failed > failedAtStart;
+      if (!tickFailed) {
+        this.service.stats.lastError = null;
+        this.lastSuccessAt = new Date(Date.now()).toISOString();
+      }
     } catch (error) {
       tickFailed = true;
+      this.recordDiagnostic("poll_error", { phase: "poll", error_code: classifyDiagnosticError(error) }, "error", diagnosticScope);
       const message = normalizeError(error);
       this.service.stats.lastError = message;
       this.pushLog("ERROR", `Tick error: ${message}`);
