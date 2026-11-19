@@ -1,11 +1,12 @@
 const { ticketFontMetrics } = require('./kitchenTicket.cjs') as typeof import('./kitchenTicket');
-import type { AnnotatedLine, EscPosFont, TicketRenderMode } from './kitchenTicket';
-export function receiptUsesRaster(layout: Pick<ReceiptLayoutConfig, 'render_mode' | 'sizes_pt'>) {
-  return layout.render_mode === 'raster' || layout.render_mode !== 'native' && Object.keys(layout.sizes_pt ?? {}).length > 0;
+import type { AnnotatedLine, EscPosFont, TicketRenderMode,TicketTextStyle } from './kitchenTicket';
+export function receiptUsesRaster(layout: Pick<ReceiptLayoutConfig, 'render_mode' | 'sizes_pt'|'layer_styles'>) {
+  return layout.render_mode === 'raster' || layout.render_mode !== 'native' && (Object.keys(layout.sizes_pt ?? {}).length > 0||Object.values(layout.layer_styles??{}).some(style=>style?.size_pt!=null));
 }
 export interface ReceiptLayoutConfig {
   layer_order?: ReceiptLayer[];
   hidden_layers?: ReceiptLayer[];
+  layer_styles?: Partial<Record<ReceiptLayer,Partial<TicketTextStyle>>>;
   labels?: Partial<Record<'disclaimer'|'total'|'payment'|'residual'|'non_fiscal',string>>;
   partial_payment?: { title: string; subtitle: string };
   render_mode?: TicketRenderMode;
@@ -47,6 +48,17 @@ export interface ReceiptLayoutConfig {
 
 export const RECEIPT_LAYER_ORDER = ['partial_title','partial_subtitle','header','header_text','disclaimer','table','timestamp','ayce','extras','cover','discount','total','payment','residual','footer','non_fiscal'] as const;
 export type ReceiptLayer = typeof RECEIPT_LAYER_ORDER[number];
+
+export function receiptLayerSection(layer:ReceiptLayer):keyof NonNullable<ReceiptLayoutConfig['sizes_pt']>{
+ if(['partial_title','partial_subtitle','header','header_text','disclaimer'].includes(layer))return 'header';
+ if(layer==='footer'||layer==='non_fiscal')return 'footer';
+ if(layer==='table'||layer==='timestamp'||layer==='total')return layer;
+ return 'items';
+}
+export function receiptLayerStyle(layout:ReceiptLayoutConfig,layer:ReceiptLayer):TicketTextStyle{
+ const explicit=layout.layer_styles?.[layer]??{},font=explicit.font??layout.font;
+ return {font,size:'normal',bold:layer==='total'||layer==='partial_title',align:['header','table','timestamp','footer'].includes(receiptLayerSection(layer))?'center':'left',space_after:0,...explicit,...(!receiptUsesRaster(layout)&&['ayce','extras','cover','discount','total','payment','residual'].includes(layer)?{align:'left' as const}:{}),size_pt:explicit.size_pt??layout.sizes_pt?.[receiptLayerSection(layer)]??(font==='B'?9:12)};
+}
 
 export const DEFAULT_RECEIPT_LAYOUT: ReceiptLayoutConfig = {
   partial_payment: { title: 'PAGAMENTO PARZIALE', subtitle: 'Solo voci pagate' },
@@ -98,9 +110,21 @@ export function normalizeReceiptLayout(raw: unknown): ReceiptLayoutConfig {
   for(const key of ['header','table','timestamp','items','total','footer'] as const){const value=rawSizes[key];if(typeof value==='number'&&Number.isFinite(value)&&value>=4&&value<=72)sizes[key]=Math.round(value*10)/10;}
   const raster=r.raster&&typeof r.raster==='object'?r.raster as Record<string,unknown>:null;
   const labels:ReceiptLayoutConfig['labels']={};
+  const layerStyles:NonNullable<ReceiptLayoutConfig['layer_styles']>={};
+  const rawStyles=r.layer_styles&&typeof r.layer_styles==='object'?r.layer_styles as Record<string,unknown>:{};
+  for(const key of RECEIPT_LAYER_ORDER){const raw=rawStyles[key];if(!raw||typeof raw!=='object'||Array.isArray(raw))continue;const value=raw as Record<string,unknown>,style:Partial<TicketTextStyle>={};
+    if(value.font==='A'||value.font==='B')style.font=value.font;
+    if(value.size==='normal'||value.size==='double')style.size=value.size;
+    if(typeof value.bold==='boolean')style.bold=value.bold;
+    if(value.align==='left'||value.align==='center'||value.align==='right')style.align=value.align;
+    if(value.space_after===0||value.space_after===1||value.space_after===2)style.space_after=value.space_after;
+    if(typeof value.size_pt==='number'&&Number.isFinite(value.size_pt)&&value.size_pt>=4&&value.size_pt<=72)style.size_pt=Math.round(value.size_pt*10)/10;
+    if(Object.keys(style).length)layerStyles[key]=style;
+  }
   for(const key of ['disclaimer','total','payment','residual','non_fiscal'] as const){const value=(r.labels as Record<string,unknown>|undefined)?.[key];if(typeof value==='string'&&value.trim())labels[key]=partialText(value,'');}
 
   return {
+    ...(Object.keys(layerStyles).length?{layer_styles:layerStyles}:{}),
     ...(Object.keys(labels).length?{labels}:{}),
     ...(Array.isArray(r.layer_order)?{layer_order:[...new Set([...r.layer_order.filter((key):key is ReceiptLayer=>RECEIPT_LAYER_ORDER.includes(key as ReceiptLayer)),...RECEIPT_LAYER_ORDER])]}:{}),
     ...(Array.isArray(r.hidden_layers)?{hidden_layers:[...new Set(r.hidden_layers.filter((key):key is ReceiptLayer=>RECEIPT_LAYER_ORDER.includes(key as ReceiptLayer)&&key!=='residual'&&key!=='discount'))]}:{}),
@@ -288,12 +312,20 @@ export function renderNonFiscalReceiptTicket(
   const addLine = (text: string, type: AnnotatedLine["type"], pointSection?:keyof NonNullable<ReceiptLayoutConfig['sizes_pt']>,bold=false,right_text?:string) => {
     text = toStr(text);
     const section=pointSection??(type==='header'||type==='table'||type==='timestamp'||type==='footer'?type:'items');
-    if(rasterMode){pushLine({text:text.trim(),type,size:'normal',bold,align:['header','table','timestamp','footer'].includes(section)?'center':'left',font:layout.font,size_pt:layout.sizes_pt?.[section]??(layout.font==='B'?9:12),right_text,preview_field:type==='blank'||type==='separator'?undefined:previewField,section:section==='total'?'items':section});return;}
-    for (const chunk of wrapReceiptLine(text, width)) pushLine({ text: chunk, type, size: "normal", bold, align: "left", font: layout.font, cell_dots: metric.cell, glyph_dots: metric.glyph, ...(right_text ? { right_text } : {}), preview_field:type==='blank'||type==='separator'?undefined:previewField });
+    const explicit=layer&&type!=='separator'&&type!=='blank'?layout.layer_styles?.[layer]:undefined;
+    const style=explicit&&layer?receiptLayerStyle(layout,layer):undefined;
+    const font=style?.font??layout.font;
+    if(rasterMode){pushLine({text:text.trim(),type,size:style?.size??'normal',bold:style?.bold??bold,align:style?.align??(['header','table','timestamp','footer'].includes(section)?'center':'left'),font,size_pt:style?.size_pt??layout.sizes_pt?.[section]??(layout.font==='B'?9:12),right_text,preview_field:type==='blank'||type==='separator'?undefined:previewField,section:section==='total'?'items':section});return;}
+    const nativeMetric=ticketFontMetrics(layout,font),factor=style?.size==='double'?2:1;
+    const available=dots!=null?dots-8:width*metric.cell;
+    const columns=style?Math.max(1,Math.floor((available-(right_text?right_text.length*nativeMetric.cell+nativeMetric.cell:0))/(nativeMetric.cell*factor))):width;
+    const chunks=wrapReceiptLine(style?text.trim():text,columns);
+    for (const [index,chunk] of chunks.entries()) pushLine({ text: chunk, type, size: style?.size??'normal', bold:style?.bold??bold, align:style?.align??'left', font, cell_dots: nativeMetric.cell, glyph_dots: nativeMetric.glyph, ...(right_text&&index===chunks.length-1 ? { right_text } : {}), preview_field:type==='blank'||type==='separator'?undefined:previewField });
   };
   const addAmount=(label:string,value:string)=> {
     const safeLabel = toStr(label), safeValue = toStr(value);
     if (rasterMode) { addLine(safeLabel, 'item', 'items', false, safeValue); return; }
+    if(layer&&layout.layer_styles?.[layer]){addLine(safeLabel,'item','items',false,safeValue);return;}
     const labelWidth = Math.max(1, width - safeValue.length - 1);
     const chunks = wrapReceiptLine(safeLabel, labelWidth);
     chunks.forEach((chunk, index) => addLine(chunk, 'item', 'items', false, index === chunks.length - 1 ? safeValue : undefined));
@@ -436,6 +468,12 @@ export function renderNonFiscalReceiptTicket(
     addSep("=");
   }
 
+  if(layout.layer_styles){
+    lines=lines.flatMap((line,index,all)=>{const key=line.preview_layer as ReceiptLayer|undefined;const count=key?layout.layer_styles?.[key]?.space_after??0:0;
+      if(!key||!count||all.slice(index+1).some(next=>next.preview_layer===key)||!all.some(row=>row.preview_layer===key&&row.type!=='blank'&&row.type!=='separator'))return [line];
+      return [line,...Array.from({length:count},()=>({text:'',type:'blank' as const,size:'normal' as const,bold:false,preview_layer:key,...(rasterMode?{size_pt:9}:{})}))];
+    });
+  }
   if(!layout.layer_order&&layout.hidden_layers?.length){
     lines=lines.filter(line=>!line.preview_layer||!layout.hidden_layers?.includes(line.preview_layer as ReceiptLayer));
   }else if(layout.layer_order){
