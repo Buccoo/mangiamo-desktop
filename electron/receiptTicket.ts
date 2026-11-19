@@ -4,6 +4,9 @@ export function receiptUsesRaster(layout: Pick<ReceiptLayoutConfig, 'render_mode
   return layout.render_mode === 'raster' || layout.render_mode !== 'native' && Object.keys(layout.sizes_pt ?? {}).length > 0;
 }
 export interface ReceiptLayoutConfig {
+  layer_order?: ReceiptLayer[];
+  hidden_layers?: ReceiptLayer[];
+  labels?: Partial<Record<'disclaimer'|'total'|'payment'|'residual'|'non_fiscal',string>>;
   partial_payment?: { title: string; subtitle: string };
   render_mode?: TicketRenderMode;
   native_profile?: 'custom-kube-ii';
@@ -41,6 +44,9 @@ export interface ReceiptLayoutConfig {
   printable_dots?: 360|384|512|576|960;
   raster?: {dpi:180|203|300;protocol:'gs-v0'|'esc-star'};
 }
+
+export const RECEIPT_LAYER_ORDER = ['partial_title','partial_subtitle','header','header_text','disclaimer','table','timestamp','ayce','extras','cover','discount','total','payment','residual','footer','non_fiscal'] as const;
+export type ReceiptLayer = typeof RECEIPT_LAYER_ORDER[number];
 
 export const DEFAULT_RECEIPT_LAYOUT: ReceiptLayoutConfig = {
   partial_payment: { title: 'PAGAMENTO PARZIALE', subtitle: 'Solo voci pagate' },
@@ -91,8 +97,13 @@ export function normalizeReceiptLayout(raw: unknown): ReceiptLayoutConfig {
   const rawSizes=r.sizes_pt&&typeof r.sizes_pt==='object'?r.sizes_pt as Record<string,unknown>:{};
   for(const key of ['header','table','timestamp','items','total','footer'] as const){const value=rawSizes[key];if(typeof value==='number'&&Number.isFinite(value)&&value>=4&&value<=72)sizes[key]=Math.round(value*10)/10;}
   const raster=r.raster&&typeof r.raster==='object'?r.raster as Record<string,unknown>:null;
+  const labels:ReceiptLayoutConfig['labels']={};
+  for(const key of ['disclaimer','total','payment','residual','non_fiscal'] as const){const value=(r.labels as Record<string,unknown>|undefined)?.[key];if(typeof value==='string'&&value.trim())labels[key]=partialText(value,'');}
 
   return {
+    ...(Object.keys(labels).length?{labels}:{}),
+    ...(Array.isArray(r.layer_order)?{layer_order:[...new Set([...r.layer_order.filter((key):key is ReceiptLayer=>RECEIPT_LAYER_ORDER.includes(key as ReceiptLayer)),...RECEIPT_LAYER_ORDER])]}:{}),
+    ...(Array.isArray(r.hidden_layers)?{hidden_layers:[...new Set(r.hidden_layers.filter((key):key is ReceiptLayer=>RECEIPT_LAYER_ORDER.includes(key as ReceiptLayer)&&key!=='residual'&&key!=='discount'))]}:{}),
     partial_payment: { title: partialText(partial.title,d.partial_payment!.title), subtitle: partialText(partial.subtitle,d.partial_payment!.subtitle) },
     ...(r.native_profile === 'custom-kube-ii' ? { native_profile: 'custom-kube-ii' as const } : {}),
     ...(r.render_mode === 'native' || r.render_mode === 'raster' ? { render_mode: r.render_mode } : {}),
@@ -267,16 +278,18 @@ export function renderNonFiscalReceiptTicket(
     ? (personsAtPayment === 1 ? "1 Quota" : `${personsAtPayment} Quote`)
     : "Extra";
 
-  const lines: AnnotatedLine[] = [];
+  let lines: AnnotatedLine[] = [];
+  let layer:ReceiptLayer|undefined;
+  const pushLine=(line:AnnotatedLine)=>lines.push({...line,preview_layer:layer});
   let previewField: string | undefined = 'header';
   const partialLabels=layout.partial_payment??DEFAULT_RECEIPT_LAYOUT.partial_payment!;
-  const content = [restaurantName, tableLabel, layout.header.custom_text, layout.footer.custom_text, ...(partial?[partialLabels.title,partialLabels.subtitle]:[]), ...ayceItems.map(item => item?.name ?? ''), ...(payload.extra_items ?? []).map(item => item?.name ?? '')].join(' ');
+  const content = [restaurantName, tableLabel,layout.table.label, ...Object.values(layout.labels??{}), layout.header.custom_text, layout.footer.custom_text, ...(partial?[partialLabels.title,partialLabels.subtitle]:[]), ...ayceItems.map(item => item?.name ?? ''), ...(payload.extra_items ?? []).map(item => item?.name ?? '')].join(' ');
   const rasterMode=receiptUsesRaster(layout) || /[^\x20-\x7e]/u.test(toStr(content));
   const addLine = (text: string, type: AnnotatedLine["type"], pointSection?:keyof NonNullable<ReceiptLayoutConfig['sizes_pt']>,bold=false,right_text?:string) => {
     text = toStr(text);
     const section=pointSection??(type==='header'||type==='table'||type==='timestamp'||type==='footer'?type:'items');
-    if(rasterMode){lines.push({text:text.trim(),type,size:'normal',bold,align:['header','table','timestamp','footer'].includes(section)?'center':'left',font:layout.font,size_pt:layout.sizes_pt?.[section]??(layout.font==='B'?9:12),right_text,preview_field:type==='blank'||type==='separator'?undefined:previewField,section:section==='total'?'items':section});return;}
-    for (const chunk of wrapReceiptLine(text, width)) lines.push({ text: chunk, type, size: "normal", bold, align: "left", font: layout.font, cell_dots: metric.cell, glyph_dots: metric.glyph, ...(right_text ? { right_text } : {}), preview_field:type==='blank'||type==='separator'?undefined:previewField });
+    if(rasterMode){pushLine({text:text.trim(),type,size:'normal',bold,align:['header','table','timestamp','footer'].includes(section)?'center':'left',font:layout.font,size_pt:layout.sizes_pt?.[section]??(layout.font==='B'?9:12),right_text,preview_field:type==='blank'||type==='separator'?undefined:previewField,section:section==='total'?'items':section});return;}
+    for (const chunk of wrapReceiptLine(text, width)) pushLine({ text: chunk, type, size: "normal", bold, align: "left", font: layout.font, cell_dots: metric.cell, glyph_dots: metric.glyph, ...(right_text ? { right_text } : {}), preview_field:type==='blank'||type==='separator'?undefined:previewField });
   };
   const addAmount=(label:string,value:string)=> {
     const safeLabel = toStr(label), safeValue = toStr(value);
@@ -297,31 +310,38 @@ export function renderNonFiscalReceiptTicket(
     addSep('=');
   }
   if (partial) {
+    layer='partial_title';
     if(partialLabels.title) addLine(centerText(partialLabels.title, width), 'header', 'header', true);
+    layer='partial_subtitle';
     if(partialLabels.subtitle) addLine(centerText(partialLabels.subtitle, width), 'header');
     if(partialLabels.title||partialLabels.subtitle) addSep();
   }
   previewField = 'header';
 
   // Header
+  layer='header';
   if (layout.header.visible) {
     addSep("=");
     if (layout.header.show_restaurant_name) {
       addLine(centerText(restaurantName, width), "header");
     }
+    layer='header_text';
     if (layout.header.custom_text.trim()) {
       addLine(centerText(layout.header.custom_text.trim(), width), "header");
     }
     addSep("=");
-    addLine(centerText("SCONTRINO NON FISCALE", width), "header");
+    layer='disclaimer';
+    addLine(centerText(layout.labels?.disclaimer??"SCONTRINO NON FISCALE", width), "header");
     addSep();
   }
 
   // Table + timestamp
+  layer='table';
   previewField = 'table';
   if (layout.table.visible) {
     addLine(centerText(`${layout.table.label}: ${tableLabel}`, width), "table");
   }
+  layer='timestamp';
   previewField = 'timestamp';
   if (layout.timestamp.visible && paidAt) {
     addLine(centerText(`Data:   ${paidAt}`, width), "timestamp");
@@ -332,6 +352,7 @@ export function renderNonFiscalReceiptTicket(
 
   // Items breakdown
   let hasItems = false;
+  layer='ayce';
   previewField = 'ayce';
   const detailedAyce = paymentScope !== 'roman_split' && ayceItems.length > 0 && ayceItems.every(validItem) &&
     ayceItems.reduce((total, item) => total + cents(item.line_total), 0) === cents(ayceTotal);
@@ -343,6 +364,7 @@ export function renderNonFiscalReceiptTicket(
     else addAmount(paymentScope === 'roman_split' ? 'Quota menu AYCE' : 'AYCE', formatCurrency(ayceTotal));
     hasItems = true;
   }
+  layer='extras';
   previewField = 'extras';
   if (layout.items.show_extras && extrasTotal > 0) {
     const items = Array.isArray(payload.extra_items) ? payload.extra_items : [];
@@ -360,6 +382,7 @@ export function renderNonFiscalReceiptTicket(
     } else addAmount(extrasLabel, formatCurrency(extrasTotal));
     hasItems = true;
   }
+  layer='cover';
   previewField = 'cover';
   if (layout.items.show_cover && coverTotal > 0) {
     if (validItem(coverItem) && cents(coverItem.line_total) === cents(coverTotal)) {
@@ -370,30 +393,35 @@ export function renderNonFiscalReceiptTicket(
   }
   if (hasItems) addSep();
   previewField = undefined;
+  layer='discount';
   if (Number.isFinite(payload.discount_total) && Number(payload.discount_total) > 0) {
     addAmount('Sconto', `-${formatCurrency(payload.discount_total)}`);
     addSep();
   }
 
   // Total
+  layer='total';
   previewField = 'total';
   if (layout.total.visible) {
-    if(rasterMode)addLine("TOTALE",'item','total',true,formatCurrency(totalAmount));
-    else addLine("TOTALE", "item", "total", true, formatCurrency(totalAmount));
-    previewField = 'payment';
+    if(rasterMode)addLine(layout.labels?.total??"TOTALE",'item','total',true,formatCurrency(totalAmount));
+    else addLine(layout.labels?.total??"TOTALE", "item", "total", true, formatCurrency(totalAmount));
+    layer='payment';
+  previewField = 'payment';
   if (layout.total.show_payment_method) {
-      addAmount("Pagamento", paymentLabel);
+      addAmount(layout.labels?.payment??"Pagamento", paymentLabel);
     }
     addSep("=");
   }
 
   if (partial) {
+    layer='residual';
     previewField = undefined;
-    addAmount('Residuo dopo pagamento', formatCurrency(remaining));
+    addAmount(layout.labels?.residual??'Residuo dopo pagamento', formatCurrency(remaining));
     addSep();
   }
 
   // Footer
+  layer='footer';
   previewField = 'footer';
   if (layout.footer.visible) {
     if (layout.footer.custom_text.trim()) {
@@ -401,12 +429,27 @@ export function renderNonFiscalReceiptTicket(
         addLine(centerText(line.trim(), width), "footer");
       }
     }
+    layer='non_fiscal';
     if (layout.footer.show_non_fiscal_label) {
-      addLine(centerText("*** NON FISCALE ***", width), "footer");
+      addLine(centerText(layout.labels?.non_fiscal??"*** NON FISCALE ***", width), "footer");
     }
     addSep("=");
   }
 
+  if(!layout.layer_order&&layout.hidden_layers?.length){
+    lines=lines.filter(line=>!line.preview_layer||!layout.hidden_layers?.includes(line.preview_layer as ReceiptLayer));
+  }else if(layout.layer_order){
+    const proof=lines.filter(line=>!line.preview_layer);
+    const content=lines.filter(line=>line.preview_layer&&!layout.hidden_layers?.includes(line.preview_layer as ReceiptLayer));
+    const ordered:AnnotatedLine[]=[...proof];
+    for(const key of layout.layer_order??RECEIPT_LAYER_ORDER){
+      const rows=content.filter(line=>line.preview_layer===key);
+      if(!rows.some(line=>line.type!=='separator'&&line.type!=='blank'))continue;
+      if(ordered.length&&ordered.at(-1)?.type!=='separator'&&rows[0].type!=='separator')ordered.push({text:sepChar.repeat(width),type:'separator',size:'normal',bold:false,font:layout.font,...(rasterMode?{size_pt:9}:{})});
+      ordered.push(...rows);
+    }
+    lines=ordered;
+  }
   const text = lines.map((l) => l.right_text ? `${l.text}  ${l.right_text}` : l.text).join("\n");
   const htmlLines = lines
     .map((l) => {

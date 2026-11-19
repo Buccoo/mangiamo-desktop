@@ -3,7 +3,7 @@ import * as opentype from 'opentype.js';
 type Command = { type: string; x?: number; y?: number; x1?: number; y1?: number; x2?: number; y2?: number };
 type Glyph = { index: number; advanceWidth: number; getPath(x: number, y: number, size: number): { commands: Command[] }; getBoundingBox():{x1:number;y1:number;x2:number;y2:number} };
 type VectorFont = { unitsPerEm: number; ascender: number; descender: number; charToGlyph(char: string): Glyph; getKerningValue(left: Glyph, right: Glyph): number };
-export type RasterLine = { text: string; preview_field?: string; right_text?: string; right_size_pt?: number; type?: string; size?: string; size_pt?: number; bold?: boolean; font?: string; align?: string; section?: string; block?: string };
+export type RasterLine = { text: string; preview_layer?: string; preview_field?: string; right_text?: string; right_size_pt?: number; type?: string; size?: string; size_pt?: number; bold?: boolean; font?: string; align?: string; section?: string; block?: string };
 export type RasterImage = { width: number; height: number; data: Uint8Array; dpi?:number };
 export type RasterRow = RasterLine & RasterImage & { y: number; inkWidth: number; paths?: string[] };
 export type RasterTicket = RasterImage & { rows: RasterRow[]; dpi: number };

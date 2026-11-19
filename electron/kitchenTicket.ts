@@ -35,6 +35,7 @@ export interface AnnotatedLine {
   size_pt?: number;
   right_text?: string;
   right_size_pt?: number;
+  preview_layer?: string;
   preview_field?: string;
 }
 
