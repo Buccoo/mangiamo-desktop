@@ -4,6 +4,7 @@ export function receiptUsesRaster(layout: Pick<ReceiptLayoutConfig, 'render_mode
   return layout.render_mode === 'raster' || layout.render_mode !== 'native' && Object.keys(layout.sizes_pt ?? {}).length > 0;
 }
 export interface ReceiptLayoutConfig {
+  partial_payment?: { title: string; subtitle: string };
   render_mode?: TicketRenderMode;
   native_profile?: 'custom-kube-ii';
   header: {
@@ -42,6 +43,7 @@ export interface ReceiptLayoutConfig {
 }
 
 export const DEFAULT_RECEIPT_LAYOUT: ReceiptLayoutConfig = {
+  partial_payment: { title: 'PAGAMENTO PARZIALE', subtitle: 'Solo voci pagate' },
   header: {
     visible: true,
     show_restaurant_name: true,
@@ -83,12 +85,15 @@ export function normalizeReceiptLayout(raw: unknown): ReceiptLayoutConfig {
   const it = r.items && typeof r.items === "object" ? (r.items as Record<string, unknown>) : {};
   const tot = r.total && typeof r.total === "object" ? (r.total as Record<string, unknown>) : {};
   const ft = r.footer && typeof r.footer === "object" ? (r.footer as Record<string, unknown>) : {};
+  const partial = r.partial_payment && typeof r.partial_payment === 'object' && !Array.isArray(r.partial_payment) ? r.partial_payment as Record<string,unknown> : {};
+  const partialText = (value: unknown, fallback: string) => typeof value === 'string' ? Array.from(value.replace(/\p{Cc}/gu,' ')).slice(0,80).join('').trim() : fallback;
   const sizes:NonNullable<ReceiptLayoutConfig['sizes_pt']>={};
   const rawSizes=r.sizes_pt&&typeof r.sizes_pt==='object'?r.sizes_pt as Record<string,unknown>:{};
   for(const key of ['header','table','timestamp','items','total','footer'] as const){const value=rawSizes[key];if(typeof value==='number'&&Number.isFinite(value)&&value>=4&&value<=72)sizes[key]=Math.round(value*10)/10;}
   const raster=r.raster&&typeof r.raster==='object'?r.raster as Record<string,unknown>:null;
 
   return {
+    partial_payment: { title: partialText(partial.title,d.partial_payment!.title), subtitle: partialText(partial.subtitle,d.partial_payment!.subtitle) },
     ...(r.native_profile === 'custom-kube-ii' ? { native_profile: 'custom-kube-ii' as const } : {}),
     ...(r.render_mode === 'native' || r.render_mode === 'raster' ? { render_mode: r.render_mode } : {}),
     ...(Object.keys(sizes).length?{sizes_pt:sizes}:{}),
@@ -264,7 +269,8 @@ export function renderNonFiscalReceiptTicket(
 
   const lines: AnnotatedLine[] = [];
   let previewField: string | undefined = 'header';
-  const content = [restaurantName, tableLabel, layout.header.custom_text, layout.footer.custom_text, ...ayceItems.map(item => item?.name ?? ''), ...(payload.extra_items ?? []).map(item => item?.name ?? '')].join(' ');
+  const partialLabels=layout.partial_payment??DEFAULT_RECEIPT_LAYOUT.partial_payment!;
+  const content = [restaurantName, tableLabel, layout.header.custom_text, layout.footer.custom_text, ...(partial?[partialLabels.title,partialLabels.subtitle]:[]), ...ayceItems.map(item => item?.name ?? ''), ...(payload.extra_items ?? []).map(item => item?.name ?? '')].join(' ');
   const rasterMode=receiptUsesRaster(layout) || /[^\x20-\x7e]/u.test(toStr(content));
   const addLine = (text: string, type: AnnotatedLine["type"], pointSection?:keyof NonNullable<ReceiptLayoutConfig['sizes_pt']>,bold=false,right_text?:string) => {
     text = toStr(text);
@@ -291,9 +297,9 @@ export function renderNonFiscalReceiptTicket(
     addSep('=');
   }
   if (partial) {
-    addLine(centerText('PAGAMENTO PARZIALE', width), 'header', 'header', true);
-    addLine(centerText('Solo voci pagate', width), 'header');
-    addSep();
+    if(partialLabels.title) addLine(centerText(partialLabels.title, width), 'header', 'header', true);
+    if(partialLabels.subtitle) addLine(centerText(partialLabels.subtitle, width), 'header');
+    if(partialLabels.title||partialLabels.subtitle) addSep();
   }
   previewField = 'header';
 
