@@ -5,7 +5,7 @@ type Glyph = { index: number; advanceWidth: number; getPath(x: number, y: number
 type VectorFont = { unitsPerEm: number; ascender: number; descender: number; charToGlyph(char: string): Glyph; getKerningValue(left: Glyph, right: Glyph): number };
 export type RasterLine = { text: string; preview_field?: string; right_text?: string; right_size_pt?: number; type?: string; size?: string; size_pt?: number; bold?: boolean; font?: string; align?: string; section?: string; block?: string };
 export type RasterImage = { width: number; height: number; data: Uint8Array; dpi?:number };
-export type RasterRow = RasterLine & RasterImage & { y: number; inkWidth: number };
+export type RasterRow = RasterLine & RasterImage & { y: number; inkWidth: number; paths?: string[] };
 export type RasterTicket = RasterImage & { rows: RasterRow[]; dpi: number };
 const fonts = new Map<string, VectorFont>();
 
@@ -113,7 +113,7 @@ function fillEdges(image: RasterImage, edges: Edge[]) {
 
 /** One deterministic monochrome renderer for browser, staff and native printing.
  * Sizes are typographic em points, converted at the destination DPI. */
-export function renderRasterTicket(input: RasterLine[], options: { width: number; dpi: number }): RasterTicket {
+export function renderRasterTicket(input: RasterLine[], options: { width: number; dpi: number; vector?: boolean }): RasterTicket {
   const { width, dpi } = options;
   if (!Number.isInteger(width) || width < 128 || width > 1280 || input.length > 1024) throw Error('TICKET_RASTER_LIMIT');
   pointsToDots(12, dpi);
@@ -136,11 +136,13 @@ export function renderRasterTicket(input: RasterLine[], options: { width: number
       const height = source.type === 'separator' ? Math.max(10,Math.round(dpi/16)) : source.type === 'blank' ? Math.round(dpi/8) : Math.ceil(ascent+descent)+4;
       if (y+height+Math.ceil(dpi*5/6)>16384) throw Error('TICKET_RASTER_LIMIT');
       const image: RasterRow = { ...source, right_text:rightText||undefined, text: source.type === 'separator' ? source.text : chunk, width, height, y, inkWidth: source.type === 'separator' ? width-16 : measure(chunk,pixels,compact,bold), data: new Uint8Array(stride*height) };
+      if(options.vector) image.paths=[];else delete image.paths;
       if (source.type === 'separator') {
         // About 0.25 mm: a single dot is too fragile on thermal paper.
         const stroke = Math.max(2, Math.round(dpi / 100));
         const center = Math.floor(height / 2), gap = stroke;
         const starts = source.text.startsWith('=') ? [center - gap - stroke, center + gap] : [center - Math.floor(stroke / 2)];
+        if(image.paths)for(const start of starts)image.paths.push(`M8 ${start}H${width-8}v${stroke}H8Z`);
         for (const start of starts) for (let ruleY = start; ruleY < start + stroke; ruleY++)
           for (let x = 8; x < width - 8; x++) image.data[ruleY * stride + (x >> 3)] |= 128 >> (x & 7);
       } else {
@@ -150,7 +152,21 @@ export function renderRasterTicket(input: RasterLine[], options: { width: number
         for (const char of text) {
           const next = glyphFor(char,bold), scale = paintPixels/next.font.unitsPerEm*compact;
           if (previous?.font === next.font) x += next.font.getKerningValue(previous.glyph,next.glyph)*scale;
-          const edges = pathEdges(next.glyph.getPath(x,2+ascent,paintPixels).commands,x,compact);
+          const commands=next.glyph.getPath(x,2+ascent,paintPixels).commands;
+          const edges = pathEdges(commands,x,compact);
+          if(image.paths) {
+            const outline=(offset:number)=>commands.map(command=>{
+              const n=(v:number|undefined)=>Number((v??0).toFixed(3));
+              const tx=(v:number|undefined)=>n(x+((v??0)-x)*compact+offset);
+              if(command.type==='Z')return 'Z';
+              if(command.type==='M'||command.type==='L')return `${command.type}${tx(command.x)} ${n(command.y)}`;
+              if(command.type==='Q')return `Q${tx(command.x1)} ${n(command.y1)} ${tx(command.x)} ${n(command.y)}`;
+              if(command.type==='C')return `C${tx(command.x1)} ${n(command.y1)} ${tx(command.x2)} ${n(command.y2)} ${tx(command.x)} ${n(command.y)}`;
+              return '';
+            }).join('');
+            image.paths.push(outline(0));
+            if(bold&&next.font===fonts.get('cjk'))image.paths.push(outline(1));
+          }
           fillEdges(image,edges);
           // The CJK fallback is regular; a deterministic one-dot expansion adds emphasis.
           if (bold && next.font === fonts.get('cjk')) fillEdges(image,edges.map(([x0,y0,x1,y1])=>[x0+1,y0,x1+1,y1]));
