@@ -46,6 +46,43 @@ async function print(job, layout, method = 'sendToPrinter') {
   await module.exports.send(job, method === 'sendToPrinter' ? { host: 'fixture-only', port: 9100 } : layout, layout);
   return bytes;
 }
+test('separate category sheets reach the printer in one write, each with its own cut', async () => {
+  const items = [
+    { name: 'URA CALIFORNIA ROLL 4PZ', quantity: 1, item_number: 209, category_id: 'ura', category_name: 'Uramaki', category_sort_order: 2 },
+    { name: 'SASHIMI SALMONE 4PZ', quantity: 1, item_number: 300, category_id: 'sas', category_name: 'Sashimi', category_sort_order: 1 },
+  ];
+  const job = { id: 'job', department: 'sushi 1', created_at: '2026-11-20T19:00:00Z', payload: { table_number: '7', department: 'sushi 1', items } };
+  const split = await print(job, { render_mode: 'native', items: { split_departments: ['sushi 1'] } });
+  const text = split.toString('latin1');
+  assert.equal(text.split('\x1dV\x00').length - 1, 2);
+  assert.ok(text.indexOf('SASHIMI SALMONE') < text.indexOf('\x1dV\x00') && text.indexOf('\x1dV\x00') < text.indexOf('URA CALIFORNIA'));
+  assert.equal((text.match(/Tavolo: 7/g) || []).length, 2);
+  const together = await print(job, { render_mode: 'native' });
+  assert.equal(together.toString('latin1').split('\x1dV\x00').length - 1, 1);
+});
+
+test('translated kitchen names: fetched for the configured department, menu names when unavailable', async () => {
+  const filename = path.join(__dirname, '../electron-dist/printWorker.cjs');
+  const { DesktopPrintWorker } = require(filename);
+  const layout = { items: { translated_names: { 'cucina 1': { language: 'zh', keep_original: true } } } };
+  const id = '9ac07cc3-826b-4fe5-834a-40d72fd430f1';
+  const job = { id: 'job', department: 'cucina 1', created_at: '2026-11-20T19:00:00Z', payload: { department: 'cucina 1', items: [{ name: 'SPAGHETTI DI SOIA MANZO', quantity: 1, menu_item_id: id }] } };
+  const worker = Object.create(DesktopPrintWorker.prototype);
+  let queried = null; worker.pushLog = () => {};
+  worker.ensureSupabaseClient = () => ({ from: table => ({ select: () => ({ in: async (_column, ids) => { queried = { table, ids }; return { data: [{ id, translations: { zh: { name: '牛肉粉丝' } } }], error: null }; } }) }) });
+  const enriched = await worker.withMenuTranslations(job, layout);
+  assert.deepEqual(queried, { table: 'menu_items', ids: [id] });
+  assert.equal(enriched.payload.items[0].translations.zh.name, '牛肉粉丝');
+  assert.match(core.renderKitchenTicketCore(enriched.payload, { layout: { ...layout, render_mode: 'raster' } }).text, /SPAGHETTI DI SOIA MANZO\n牛肉粉丝/);
+  worker.ensureSupabaseClient = () => ({ from: () => ({ select: () => ({ in: async () => ({ data: null, error: new Error('offline') }) }) }) });
+  assert.equal(await worker.withMenuTranslations(job, layout), job, 'failure prints the menu names');
+  queried = null;
+  worker.ensureSupabaseClient = () => ({ from: table => ({ select: () => ({ in: async () => { queried = table; return { data: [], error: null }; } }) }) });
+  const bar = { ...job, department: 'bar', payload: { ...job.payload, department: 'bar' } };
+  assert.equal(await worker.withMenuTranslations(bar, layout), bar, 'other departments keep the payload');
+  assert.equal(queried, null, 'no lookup for departments without translated names');
+});
+
 const sample = { table_number: '5', restaurant_name: 'Fixture', order_number: 7, department: 'cucina', created_at: '2026-10-29T10:00:00Z', items: [
   { name: 'Sushi Assortito', quantity: 2, item_number: 1, guest_name: 'Marco' },
   { name: 'Gyoza Fritti', quantity: 1, item_number: 2, notes: 'senza aglio', modifiers: [{ name: 'Wasabi', modifier_type: 'remove' }] },

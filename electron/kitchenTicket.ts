@@ -41,6 +41,10 @@ export interface AnnotatedLine {
 
 // ─── Kitchen layout ─────────────────────────────────────────────────────────
 
+/** language: menu translation code (e.g. "zh"); keep_original also prints the menu name above it. */
+export interface KitchenNameTranslation { language: string; keep_original: boolean }
+export const KITCHEN_NAME_LANGUAGES = ['zh', 'en', 'es', 'fr', 'de'] as const;
+
 export interface KitchenLayoutConfig {
   render_mode?: TicketRenderMode;
   align: TicketAlignment;
@@ -68,6 +72,10 @@ export interface KitchenLayoutConfig {
     show_guest_name: boolean;
     show_notes: boolean;
     group_by_category: boolean;
+    /** Departments whose tickets print each menu category on its own cut sheet. */
+    split_departments?: string[];
+    /** Per normalized department: print dish names from menu translations. */
+    translated_names?: Record<string, KitchenNameTranslation>;
   };
   footer: {
     visible: boolean;
@@ -189,6 +197,8 @@ export function normalizeKitchenLayout(raw: unknown): KitchenLayoutConfig {
       show_guest_name: it.show_guest_name !== false,
       show_notes: it.show_notes !== false,
       group_by_category: it.group_by_category !== false,
+      ...(() => { const split = Array.isArray(it.split_departments) ? [...new Set(it.split_departments.filter((value): value is string => typeof value === 'string').map(normalizeDepartmentLabel).filter(value => value.length <= 64))].slice(0, 64).sort() : []; return split.length ? { split_departments: split } : {}; })(),
+      ...(() => { const names = normalizeTranslatedNames(it.translated_names); return names ? { translated_names: names } : {}; })(),
     },
     footer: {
       visible: ft.visible !== false,
@@ -206,6 +216,25 @@ export function normalizeKitchenLayout(raw: unknown): KitchenLayoutConfig {
     ...(r.native_profile === 'custom-kube-ii' ? { native_profile: 'custom-kube-ii' as const } : {}),
     ...(raster ? { raster: { dpi: ([180,203,300].includes(Number(raster.dpi)) ? Number(raster.dpi) : 203) as 180 | 203 | 300, protocol: raster.protocol === 'esc-star' ? 'esc-star' as const : 'gs-v0' as const } } : {}),
   };
+}
+
+function normalizeTranslatedNames(raw: unknown): Record<string, KitchenNameTranslation> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const result: Record<string, KitchenNameTranslation> = {};
+  for (const [key, value] of Object.entries(raw).slice(0, 64)) {
+    const department = normalizeDepartmentLabel(key);
+    if (department.length > 64 || !value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const entry = value as Record<string, unknown>;
+    const language = String(entry.language ?? '').trim().toLowerCase();
+    if (!(KITCHEN_NAME_LANGUAGES as readonly string[]).includes(language)) continue;
+    result[department] = { language, keep_original: entry.keep_original === true };
+  }
+  return Object.keys(result).length ? result : undefined;
+}
+
+/** The menu translation a department's tickets should print, if any. */
+export function kitchenNameTranslation(rawLayout: unknown, department: string | null | undefined): KitchenNameTranslation | null {
+  return normalizeKitchenLayout(rawLayout).items.translated_names?.[normalizeDepartmentLabel(department)] ?? null;
 }
 
 export function printerProfileKey(host: string, port = 9100) { return `${host.trim().toLowerCase()}:${port}`; }
@@ -257,6 +286,8 @@ export interface KitchenTicketItem {
   guest_name?: string | null;
   added_by?: string | null;
   department?: string | null;
+  /** Menu translations ({ zh: { name } }), resolved by the printing client. */
+  translations?: Record<string, { name?: string | null } | null> | null;
 }
 
 export interface KitchenTicketPayload {
@@ -406,6 +437,28 @@ export function sortKitchenItemsByCategory(items: KitchenTicketItem[]): KitchenT
   return [...groups.entries()].sort(([a, x], [b, y]) => !a ? (b ? 1 : 0) : !b ? -1 : x.order - y.order || x.first - y.first).flatMap(([, group]) => group.items);
 }
 
+/** One payload per menu category when the ticket's department prints separate
+ * sheets, in the same category order as a grouped ticket. Otherwise as is. */
+export function splitKitchenTicketPayload(payload: KitchenTicketPayload, rawLayout?: unknown): KitchenTicketPayload[] {
+  const layout = normalizeKitchenLayout(rawLayout);
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  if (!layout.items.split_departments?.includes(normalizeDepartmentLabel(payload.department)) || items.length === 0) return [payload];
+  const groups = new Map<string, KitchenTicketItem[]>();
+  for (const item of sortKitchenItemsByCategory(items)) {
+    const key = kitchenCategoryKey(item);
+    groups.set(key, [...(groups.get(key) ?? []), item]);
+  }
+  return groups.size <= 1 ? [payload] : [...groups.values()].map(group => ({ ...payload, items: group }));
+}
+
+/** Every sheet to print for one kitchen job, each a complete ticket. */
+export function renderKitchenTicketSheets(
+  payload: KitchenTicketPayload,
+  options?: { jobId?: string; layout?: unknown; serviceHeadings?: string[] },
+): KitchenTicketRenderResult[] {
+  return splitKitchenTicketPayload(payload, options?.layout).map(sheet => renderKitchenTicketCore(sheet, options));
+}
+
 export function renderKitchenTicketCore(
   payload: KitchenTicketPayload,
   options?: { jobId?: string; layout?: unknown; serviceHeadings?: string[] },
@@ -421,6 +474,7 @@ export function renderKitchenTicketCore(
   const mergedItems = consolidateKitchenTicketItems(Array.isArray(payload.items) ? payload.items : []);
   const items = layout.items.group_by_category ? sortKitchenItemsByCategory(mergedItems) : mergedItems;
   const department = normalizeDepartmentLabel(payload.department);
+  const nameTranslation = layout.items.translated_names?.[department] ?? null;
   const restaurantName = toStringValue(payload.restaurant_name).trim() || "Ristorante";
   const tableLabel = toStringValue(payload.table_number).trim() || "-";
   const orderLabel = payload.order_number != null ? `#${payload.order_number}` : "#-";
@@ -486,9 +540,14 @@ export function renderKitchenTicketCore(
       const number = layout.items.item_number_style === 'hash' ? `#${item.item_number}` : layout.items.item_number_style === 'plain' ? `${item.item_number}` : `(${item.item_number})`;
       const numberPrefix = layout.items.show_item_number && item.item_number != null ? `${number} ` : "";
       const qtyPrefix = layout.items.show_quantity || service ? `${qty}x ` : "";
-      const itemTitle = `${qtyPrefix}${numberPrefix}${toStringValue(item.name).trim()}`;
+      const menuName = toStringValue(item.name).trim();
+      const translated = nameTranslation ? toStringValue(item.translations?.[nameTranslation.language]?.name).trim() : "";
+      const useTranslation = !!translated && translated !== menuName;
+      const itemTitle = `${qtyPrefix}${numberPrefix}${useTranslation && !nameTranslation?.keep_original ? translated : menuName}`;
 
       addLine(itemTitle, "item", layout.items.size, layout.items.bold);
+      // Missing translations fall back to the menu name: a dish is never dropped.
+      if (useTranslation && nameTranslation?.keep_original) addLine(translated, "item", layout.items.size, layout.items.bold);
 
       if (layout.items.show_guest_name) {
         const guest = toStringValue(item.guest_name).trim();

@@ -13,7 +13,7 @@ import type * as Diagnostics from "./printDiagnostics";
 const { PrintDiagnostics, classifyDiagnosticError } = require("./printDiagnostics.cjs") as typeof Diagnostics;
 
 import type * as KitchenTicket from "./kitchenTicket";
-const { renderKitchenTicketCore, buildKitchenEscPos, resolveKitchenPrinterLayout } = require("./kitchenTicket.cjs") as typeof KitchenTicket;
+const { renderKitchenTicketCore, renderKitchenTicketSheets, kitchenNameTranslation, buildKitchenEscPos, resolveKitchenPrinterLayout } = require("./kitchenTicket.cjs") as typeof KitchenTicket;
 import type * as TicketFonts from './ticketFonts';
 const { buildPreciseTicket } = require('./ticketFonts.cjs') as typeof TicketFonts;
 
@@ -472,6 +472,16 @@ function renderAnnotatedKitchenTicket(job: JobRow, liveLayout?: unknown) {
  const layout=liveLayout??snapshot.kitchen;
  const service=serviceTicketMetadata(job);
  return renderKitchenTicketCore({...payload,department:String(payload.department??job.department??'cucina'),created_at:String(payload.created_at??job.created_at??'')},
+  {jobId:job.id,layout,serviceHeadings:service?serviceTicketHeader(service):undefined});
+}
+
+/** Every cut sheet of one kitchen job (several when categories print separately). */
+function renderAnnotatedKitchenSheets(job: JobRow, liveLayout?: unknown) {
+ const payload=job.payload??{};
+ const snapshot=(payload.layout&&typeof payload.layout==='object'?payload.layout:{}) as Record<string,unknown>;
+ const layout=liveLayout??snapshot.kitchen;
+ const service=serviceTicketMetadata(job);
+ return renderKitchenTicketSheets({...payload,department:String(payload.department??job.department??'cucina'),created_at:String(payload.created_at??job.created_at??'')},
   {jobId:job.id,layout,serviceHeadings:service?serviceTicketHeader(service):undefined});
 }
 
@@ -1538,6 +1548,27 @@ export class DesktopPrintWorker {
     return null;
   }
 
+  /** Best effort: add menu translations for departments printing translated
+   * dish names. Any failure prints the menu names; a ticket is never held back. */
+  async withMenuTranslations(job: JobRow, layout: unknown): Promise<JobRow> {
+    const items = Array.isArray(job.payload?.items) ? job.payload.items as Array<Record<string, unknown>> : [];
+    if (!items.length || !kitchenNameTranslation(layout, String(job.payload?.department ?? job.department ?? ''))) return job;
+    const ids = [...new Set(items.map(item => String(item?.menu_item_id ?? '')).filter(id => /^[0-9a-f-]{36}$/i.test(id)))];
+    if (!ids.length) return job;
+    try {
+      const { data, error } = await this.ensureSupabaseClient().from("menu_items").select("id,translations").in("id", ids);
+      if (error) throw error;
+      const byId = new Map((Array.isArray(data) ? data : []).map(row => [String((row as Record<string, unknown>).id), (row as Record<string, unknown>).translations]));
+      return { ...job, payload: { ...job.payload, items: items.map(item => {
+        const translations = byId.get(String(item?.menu_item_id ?? ''));
+        return translations && typeof translations === 'object' && !Array.isArray(translations) ? { ...item, translations } : item;
+      }) } };
+    } catch (error) {
+      this.pushLog("WARN", `Nomi tradotti non disponibili, stampo i nomi del menu: ${normalizeError(error)}`);
+      return job;
+    }
+  }
+
   private async sendToPrinter(job: JobRow, routeOverride: { host: string; port: number } | null, kitchenLayout?: unknown, beforeWrite?: () => Promise<void>) {
     if (serviceTicketMetadata(job) && !beforeWrite) throw new PrintNotSentError("SERVICE_PRINT_RENEWAL_REQUIRED");
     const host = String(routeOverride?.host || "").trim();
@@ -1545,12 +1576,16 @@ export class DesktopPrintWorker {
     if (!host) throw new PrintNotSentError("NO_PRINTER_HOST");
     const snapshot = (job.payload?.layout ?? {}) as Record<string, unknown>;
     const chosenLayout = resolveKitchenPrinterLayout(job.payload?.layout_test === true ? snapshot.kitchen : kitchenLayout ?? snapshot.kitchen, host, port);
+    const translates = !isPinSlipJob(job) && !!kitchenNameTranslation(chosenLayout, String(job.payload?.department ?? job.department ?? ''));
+    const printable = translates ? await this.withMenuTranslations(job, chosenLayout) : job;
     let payload: Buffer;
     try {
       if (isPinSlipJob(job)) payload = buildEscPosPayload(renderPinSlip(job), { pinSlip: true });
       else {
-        const lines = renderAnnotatedKitchenTicket(job, chosenLayout).lines;
-        payload = lines.some(line => line.size_pt != null) ? buildPreciseTicket(lines, chosenLayout) : Buffer.from(buildKitchenEscPos(lines, chosenLayout));
+        // One socket write for the whole job: every sheet ends with its own cut,
+        // so separate category sheets stay atomic with the single acknowledgement.
+        payload = Buffer.concat(renderAnnotatedKitchenSheets(printable, chosenLayout).map(({ lines }) =>
+          lines.some(line => line.size_pt != null) ? buildPreciseTicket(lines, chosenLayout) : Buffer.from(buildKitchenEscPos(lines, chosenLayout))));
       }
     } catch (error) { throw new PrintNotSentError(normalizeError(error)); }
     let lastError: unknown = null;

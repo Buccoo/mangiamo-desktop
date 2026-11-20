@@ -1,6 +1,6 @@
 {
   "name": "sushiamo-desktop",
-  "version": "1.5.67",
+  "version": "1.5.68",
   "private": true,
   "type": "module",
   "main": "electron-dist/main.cjs",
