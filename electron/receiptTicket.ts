@@ -260,9 +260,10 @@ function escapeHtml(value: string): string {
     .replaceAll("'", "&#39;");
 }
 
-function normalizePaymentMethod(raw: unknown): "card" | "cash" {
+/** Unknown when the venue does not ask the method (no fiscalization): no payment line is printed. */
+function normalizePaymentMethod(raw: unknown): "card" | "cash" | null {
   const s = toStr(raw).toLowerCase().trim();
-  return s === "cash" || s === "contanti" ? "cash" : "card";
+  return !s ? null : s === "cash" || s === "contanti" ? "cash" : "card";
 }
 
 export function renderNonFiscalReceiptTicket(
@@ -281,7 +282,7 @@ export function renderNonFiscalReceiptTicket(
   const tableLabel = toStr(payload.table_number).trim() || "-";
   const paidAt = formatTimestamp(payload.paid_at);
   const paymentMethod = normalizePaymentMethod(payload.payment_method);
-  const paymentLabel = paymentMethod === "cash" ? "Contanti" : "Carta";
+  const paymentLabel = paymentMethod === "cash" ? "Contanti" : paymentMethod === "card" ? "Carta" : null;
   const paymentScope = toStr(payload.payment_scope).toLowerCase().trim();
   const personsAtPayment = Math.max(1, Math.trunc(Number(payload.persons_at_payment ?? 1) || 1));
   const ayceTotal = Number(payload.ayce_total) || 0;
@@ -439,7 +440,7 @@ export function renderNonFiscalReceiptTicket(
     else addLine(layout.labels?.total??"TOTALE", "item", "total", true, formatCurrency(totalAmount));
     layer='payment';
   previewField = 'payment';
-  if (layout.total.show_payment_method) {
+  if (layout.total.show_payment_method && paymentLabel) {
       addAmount(layout.labels?.payment??"Pagamento", paymentLabel);
     }
     addSep("=");
