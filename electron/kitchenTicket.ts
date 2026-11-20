@@ -542,7 +542,8 @@ export function renderKitchenTicketCore(
       const qtyPrefix = layout.items.show_quantity || service ? `${qty}x ` : "";
       const menuName = toStringValue(item.name).trim();
       const translated = nameTranslation ? toStringValue(item.translations?.[nameTranslation.language]?.name).trim() : "";
-      const useTranslation = !!translated && translated !== menuName;
+      // A menu name that already contains the translation (legacy "WAKAME 日本海带") is printed once.
+      const useTranslation = !!translated && !menuName.includes(translated);
       const itemTitle = `${qtyPrefix}${numberPrefix}${useTranslation && !nameTranslation?.keep_original ? translated : menuName}`;
 
       addLine(itemTitle, "item", layout.items.size, layout.items.bold);
