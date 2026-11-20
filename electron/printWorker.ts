@@ -852,6 +852,9 @@ export class DesktopPrintWorker {
   private identityGeneration = 0;
   private serviceStartPromise: Promise<WorkerPublicState> | null = null;
   private serviceStartGeneration = 0;
+  /** Only an explicit "Ferma" from staff keeps the service down; every other
+   * stop (session sync, restart race, failed start) is healed by the watchdog. */
+  private serviceStoppedByUser = false;
   private lastAgentHeartbeatAt = 0;
   private nextReceiptQueue = 0;
   private readonly runtimeConfig: RuntimeConfig;
@@ -946,8 +949,26 @@ export class DesktopPrintWorker {
       }
     }
     void this.refreshDiagnosticsIdentity();
-    this.diagnosticsIdentityTimer = setInterval(() => { void this.refreshDiagnosticsIdentity(); }, 15000);
+    this.diagnosticsIdentityTimer = setInterval(() => {
+      void this.ensureServiceRunning();
+      void this.refreshDiagnosticsIdentity();
+    }, 15000);
     this.diagnosticsIdentityTimer.unref?.();
+  }
+
+  /** Watchdog: a bridge with a saved session must be printing unless staff
+   * stopped it. Restarts after failed/invalidated starts (network at boot,
+   * renderer session sync racing the autostart) instead of staying silent. */
+  async ensureServiceRunning() {
+    if (!this.config.autoStart || !this.savedSession || this.serviceStoppedByUser || this.updatePaused) return;
+    if (this.service.running || this.serviceStartPromise) return;
+    try {
+      this.pushLog("WARN", "Servizio stampa non attivo: riavvio automatico");
+      await this.startService();
+    } catch (error) {
+      this.recordDiagnostic("poll_error", { phase: "service", error_code: classifyDiagnosticError(error) }, "error");
+      this.pushLog("WARN", `Riavvio automatico non riuscito: ${normalizeError(error)}`);
+    }
   }
 
   async shutdown() {
@@ -1062,6 +1083,7 @@ export class DesktopPrintWorker {
   }
 
   async startService(): Promise<WorkerPublicState> {
+    this.serviceStoppedByUser = false;
     if (this.serviceStartPromise) return this.serviceStartPromise;
     const generation = ++this.serviceStartGeneration;
     const pending = this.startServiceAfterReview(generation);
@@ -1125,9 +1147,14 @@ export class DesktopPrintWorker {
     if (this.service.running && !this.service.processing) void this.runTick();
   }
 
-  async stopService() {
+  async stopService(options: { byUser?: boolean } = {}) {
     const wasRunning = this.service.running;
+    if (options.byUser) this.serviceStoppedByUser = true;
     this.serviceStartGeneration += 1;
+    // The in-flight start belongs to the invalidated generation and will return
+    // without running. Never hand it to the next startService() caller, or the
+    // service stays silently stopped (UMAIYA 2026-11-20 13:28-14:15).
+    this.serviceStartPromise = null;
     this.service.running = false;
     if (wasRunning) this.recordDiagnostic("service_stop", { phase: "service", service_state: "stopped" });
     if (this.service.timer) {

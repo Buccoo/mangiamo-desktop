@@ -117,6 +117,9 @@ const desktopUpdateActions = createDesktopUpdateActions({
 });
 
 let desktopInstallPreparation: Promise<{ ok: boolean; reason?: string; error?: string }> | null = null;
+/** Set by before-quit / Windows session end: the close is not a staff click on X. */
+let appQuitRequested = false;
+let mainWindowCloseConfirmed = false;
 function installDesktopUpdateSafely() {
   if (desktopInstallPreparation) return desktopInstallPreparation;
   if (!desktopAutoUpdateEnabled || !desktopUpdateDownloaded) return Promise.resolve(desktopUpdateActions.install());
@@ -1219,10 +1222,32 @@ async function createMainWindow() {
     printWorker.attachWindow(mainWindow);
   }
 
-  mainWindow.on("close", () => {
+  mainWindow.on("session-end", () => { appQuitRequested = true; });
+  mainWindow.on("close", (event) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       writeWindowState(mainWindow);
     }
+    // Closing the window quits the app and with it the print bridge. Warn staff
+    // instead of silently stopping kitchen tickets mid-service. Never block an
+    // explicit quit, an update install or a Windows shutdown.
+    if (mainWindowCloseConfirmed || appQuitRequested || desktopInstallPreparation || desktopUpdateActions.installing) return;
+    if (!mainWindow || mainWindow.isDestroyed() || !printWorker?.getPublicState().service.running) return;
+    const choice = dialog.showMessageBoxSync(mainWindow, {
+      type: "warning",
+      buttons: ["Riduci a icona (continua a stampare)", "Chiudi e ferma le stampe"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      title: "Stampa comande attiva",
+      message: "Se chiudi Mangiamo Desktop le comande NON verranno più stampate.",
+      detail: "Per continuare a stampare in cucina, riduci la finestra a icona invece di chiuderla.",
+    });
+    if (choice === 0) {
+      event.preventDefault();
+      mainWindow.minimize();
+      return;
+    }
+    mainWindowCloseConfirmed = true;
   });
   mainWindow.on("closed", () => {
     if (printWorker) {
@@ -1540,7 +1565,7 @@ app
     });
     ipcMain.handle("desktop:printer:stop", async () => {
       if (!printWorker) throw new Error("PRINT_WORKER_UNAVAILABLE");
-      return printWorker.stopService();
+      return printWorker.stopService({ byUser: true });
     });
     ipcMain.handle("desktop:wifi:scan-networks", async () => {
       return scanWifiNetworks();
@@ -1587,6 +1612,7 @@ app.on("window-all-closed", () => {
 let diagnosticsQuitPending = false;
 let diagnosticsQuitComplete = false;
 app.on("before-quit", (event) => {
+  appQuitRequested = true;
   stopDesktopAutoUpdatePolling();
   if (!printWorker || diagnosticsQuitComplete) return;
   event.preventDefault();
