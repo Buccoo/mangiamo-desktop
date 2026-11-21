@@ -3,6 +3,10 @@ export type EscPosSize = "normal" | "double";
 export type EscPosFont = "A" | "B";
 export type TicketRenderMode = 'native' | 'raster';
 export type KitchenItemNumberStyle = 'parentheses' | 'hash' | 'plain';
+export interface KitchenSplitGroupRule {
+  groups: string[][];
+  rest: "together" | "separate";
+}
 /** Missing mode preserves pre-selector layouts, including existing point sizes. */
 export function kitchenUsesRaster(layout: Pick<KitchenLayoutConfig, 'render_mode' | 'styles'>) {
   return layout.render_mode === 'raster' || layout.render_mode !== 'native' && Object.values(layout.styles ?? {}).some(style => style?.size_pt != null);
@@ -74,6 +78,8 @@ export interface KitchenLayoutConfig {
     group_by_category: boolean;
     /** Departments whose tickets print each menu category on its own cut sheet. */
     split_departments?: string[];
+    /** Per normalized department: custom sheet grouping of categories + rule for unassigned categories. */
+    split_groups?: Record<string, KitchenSplitGroupRule>;
     /** Per normalized department: print dish names from menu translations. */
     translated_names?: Record<string, KitchenNameTranslation>;
   };
@@ -198,6 +204,7 @@ export function normalizeKitchenLayout(raw: unknown): KitchenLayoutConfig {
       show_notes: it.show_notes !== false,
       group_by_category: it.group_by_category !== false,
       ...(() => { const split = Array.isArray(it.split_departments) ? [...new Set(it.split_departments.filter((value): value is string => typeof value === 'string').map(normalizeDepartmentLabel).filter(value => value.length <= 64))].slice(0, 64).sort() : []; return split.length ? { split_departments: split } : {}; })(),
+      ...(() => { const splitGroups = normalizeSplitGroups(it.split_groups); return splitGroups ? { split_groups: splitGroups } : {}; })(),
       ...(() => { const names = normalizeTranslatedNames(it.translated_names); return names ? { translated_names: names } : {}; })(),
     },
     footer: {
@@ -216,6 +223,37 @@ export function normalizeKitchenLayout(raw: unknown): KitchenLayoutConfig {
     ...(r.native_profile === 'custom-kube-ii' ? { native_profile: 'custom-kube-ii' as const } : {}),
     ...(raster ? { raster: { dpi: ([180,203,300].includes(Number(raster.dpi)) ? Number(raster.dpi) : 203) as 180 | 203 | 300, protocol: raster.protocol === 'esc-star' ? 'esc-star' as const : 'gs-v0' as const } } : {}),
   };
+}
+
+function normalizeSplitGroups(raw: unknown): Record<string, KitchenSplitGroupRule> | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const out: Record<string, KitchenSplitGroupRule> = {};
+  for (const [deptKey, value] of Object.entries(raw as Record<string, unknown>)) {
+    const dept = normalizeDepartmentLabel(deptKey);
+    if (!dept || dept.length > 64 || !value || typeof value !== "object" || Array.isArray(value)) continue;
+    const rec = value as Record<string, unknown>;
+    const rest: "together" | "separate" = rec.rest === "separate" ? "separate" : "together";
+    const seen = new Set<string>();
+    const groups: string[][] = [];
+    if (Array.isArray(rec.groups)) {
+      for (const rawGroup of rec.groups.slice(0, 32)) {
+        if (!Array.isArray(rawGroup)) continue;
+        const cats: string[] = [];
+        for (const entry of rawGroup) {
+          if (typeof entry !== "string") continue;
+          const cat = entry.trim().toLowerCase();
+          if (!cat || cat.length > 80 || seen.has(cat)) continue;
+          seen.add(cat);
+          cats.push(cat);
+        }
+        groups.push(cats);
+      }
+    }
+    if (groups.length > 0 || rest === "separate") {
+      out[dept] = { groups, rest };
+    }
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 function normalizeTranslatedNames(raw: unknown): Record<string, KitchenNameTranslation> | undefined {
@@ -437,18 +475,55 @@ export function sortKitchenItemsByCategory(items: KitchenTicketItem[]): KitchenT
   return [...groups.entries()].sort(([a, x], [b, y]) => !a ? (b ? 1 : 0) : !b ? -1 : x.order - y.order || x.first - y.first).flatMap(([, group]) => group.items);
 }
 
-/** One payload per menu category when the ticket's department prints separate
- * sheets, in the same category order as a grouped ticket. Otherwise as is. */
+/** One payload per sheet according to the department's split rule:
+ * - split_departments: one sheet per menu category
+ * - split_groups: one sheet per configured category group + remaining categories together or separate
+ * - otherwise: single sheet as is. */
 export function splitKitchenTicketPayload(payload: KitchenTicketPayload, rawLayout?: unknown): KitchenTicketPayload[] {
   const layout = normalizeKitchenLayout(rawLayout);
   const items = Array.isArray(payload.items) ? payload.items : [];
-  if (!layout.items.split_departments?.includes(normalizeDepartmentLabel(payload.department)) || items.length === 0) return [payload];
-  const groups = new Map<string, KitchenTicketItem[]>();
-  for (const item of sortKitchenItemsByCategory(items)) {
-    const key = kitchenCategoryKey(item);
-    groups.set(key, [...(groups.get(key) ?? []), item]);
+  if (items.length === 0) return [payload];
+  const dept = normalizeDepartmentLabel(payload.department);
+  if (layout.items.split_departments?.includes(dept)) {
+    const groups = new Map<string, KitchenTicketItem[]>();
+    for (const item of sortKitchenItemsByCategory(items)) {
+      const key = kitchenCategoryKey(item);
+      groups.set(key, [...(groups.get(key) ?? []), item]);
+    }
+    return groups.size <= 1 ? [payload] : [...groups.values()].map(group => ({ ...payload, items: group }));
   }
-  return groups.size <= 1 ? [payload] : [...groups.values()].map(group => ({ ...payload, items: group }));
+  const rule = layout.items.split_groups?.[dept];
+  if (!rule) return [payload];
+  const catToGroup = new Map<string, number>();
+  rule.groups.forEach((group, idx) => {
+    for (const cat of group) catToGroup.set(cat, idx);
+  });
+  const groupedBuckets: KitchenTicketItem[][] = rule.groups.map(() => []);
+  const restItems: KitchenTicketItem[] = [];
+  for (const item of sortKitchenItemsByCategory(items)) {
+    const nameKey = String(item.category_name ?? "").trim().toLowerCase();
+    const idKey = String(item.category_id ?? "").trim().toLowerCase();
+    const groupIdx = catToGroup.get(nameKey) ?? catToGroup.get(idKey);
+    if (groupIdx !== undefined) groupedBuckets[groupIdx].push(item);
+    else restItems.push(item);
+  }
+  const sheets: KitchenTicketItem[][] = [];
+  for (const bucket of groupedBuckets) {
+    if (bucket.length > 0) sheets.push(bucket);
+  }
+  if (restItems.length > 0) {
+    if (rule.rest === "separate") {
+      const restGroups = new Map<string, KitchenTicketItem[]>();
+      for (const item of restItems) {
+        const key = kitchenCategoryKey(item);
+        restGroups.set(key, [...(restGroups.get(key) ?? []), item]);
+      }
+      for (const group of restGroups.values()) sheets.push(group);
+    } else {
+      sheets.push(restItems);
+    }
+  }
+  return sheets.length <= 1 ? [payload] : sheets.map(group => ({ ...payload, items: group }));
 }
 
 /** Every sheet to print for one kitchen job, each a complete ticket. */

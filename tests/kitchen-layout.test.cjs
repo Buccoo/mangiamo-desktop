@@ -299,3 +299,25 @@ test('dish number formats reach the real Desktop socket without a physical print
   assert.equal(bytes.subarray(-3).toString('hex'),'1d5600');
  }
 });
+
+test('custom category sheet groups (split_groups) split payloads on Desktop', () => {
+ const barPayload = {
+  table_number: '12',
+  department: 'bar',
+  items: [
+   { name: 'Acqua', quantity: 1, category_id: 'c1', category_name: 'Acqua', category_sort_order: 1 },
+   { name: 'Birra', quantity: 1, category_id: 'c2', category_name: 'Birre', category_sort_order: 2 },
+   { name: 'Vino', quantity: 1, category_id: 'c3', category_name: 'Vini', category_sort_order: 3 },
+   { name: 'Salsa', quantity: 1, category_id: 'c4', category_name: 'Salse', category_sort_order: 4 },
+  ],
+ };
+ const togetherSheets = core.splitKitchenTicketPayload(barPayload, { items: { split_groups: { bar: { groups: [['Salse']], rest: 'together' } } } });
+ assert.equal(togetherSheets.length, 2);
+ assert.deepEqual(togetherSheets[0].items.map(i => i.name), ['Salsa']);
+ assert.deepEqual(togetherSheets[1].items.map(i => i.name), ['Acqua', 'Birra', 'Vino']);
+ const separateSheets = core.splitKitchenTicketPayload(barPayload, { items: { split_groups: { bar: { groups: [['Birre', 'Vini']], rest: 'separate' } } } });
+ assert.equal(separateSheets.length, 3);
+ assert.deepEqual(separateSheets[0].items.map(i => i.name), ['Birra', 'Vino']);
+ assert.deepEqual(separateSheets[1].items.map(i => i.name), ['Acqua']);
+ assert.deepEqual(separateSheets[2].items.map(i => i.name), ['Salsa']);
+});
