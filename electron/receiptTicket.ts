@@ -387,7 +387,7 @@ export function renderNonFiscalReceiptTicket(
   let hasItems = false;
   layer='ayce';
   previewField = 'ayce';
-  const detailedAyce = paymentScope !== 'roman_split' && ayceItems.length > 0 && ayceItems.every(validItem) &&
+  const detailedAyce = ayceItems.length > 0 && ayceItems.every(validItem) &&
     ayceItems.reduce((total, item) => total + cents(item.line_total), 0) === cents(ayceTotal);
   if (layout.items.show_ayce && (ayceTotal > 0 || detailedAyce)) {
     if (detailedAyce) for (const item of ayceItems) {
