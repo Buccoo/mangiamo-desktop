@@ -10,6 +10,8 @@ export interface ReceiptLayoutConfig {
   labels?: Partial<Record<'disclaimer'|'total'|'payment'|'residual'|'non_fiscal',string>>;
   partial_payment?: { title: string; subtitle: string };
   render_mode?: TicketRenderMode;
+  /** Currency mark on amounts: "EUR 17,90" (default) or "€ 17,90" (printed as graphics). */
+  currency?: 'EUR' | '€';
   native_profile?: 'custom-kube-ii';
   header: {
     visible: boolean;
@@ -130,6 +132,7 @@ export function normalizeReceiptLayout(raw: unknown): ReceiptLayoutConfig {
     ...(Array.isArray(r.hidden_layers)?{hidden_layers:[...new Set(r.hidden_layers.filter((key):key is ReceiptLayer=>RECEIPT_LAYER_ORDER.includes(key as ReceiptLayer)&&key!=='residual'&&key!=='discount'))]}:{}),
     partial_payment: { title: partialText(partial.title,d.partial_payment!.title), subtitle: partialText(partial.subtitle,d.partial_payment!.subtitle) },
     ...(r.native_profile === 'custom-kube-ii' ? { native_profile: 'custom-kube-ii' as const } : {}),
+    ...(r.currency === '€' ? { currency: '€' as const } : {}),
     ...(r.render_mode === 'native' || r.render_mode === 'raster' ? { render_mode: r.render_mode } : {}),
     ...(Object.keys(sizes).length?{sizes_pt:sizes}:{}),
     ...(r.printable_dots!=null||Object.keys(sizes).length||r.render_mode==='raster'?{printable_dots:([360,384,512,576,960].includes(Number(r.printable_dots))?Number(r.printable_dots):Number(r.width)===32?384:Number(r.width)===80?960:576) as 360|384|512|576|960}:{}),
@@ -222,11 +225,11 @@ function toStr(value: unknown): string {
   return String(value).replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
 }
 
-function formatCurrency(value: unknown): string {
+function formatCurrency(value: unknown, mark = "EUR"): string {
   const n = Number(value);
-  if (!Number.isFinite(n)) return "EUR 0,00";
+  if (!Number.isFinite(n)) return `${mark} 0,00`;
   const str = Math.abs(n).toFixed(2).replace(".", ",");
-  return `EUR ${str}`;
+  return `${mark} ${str}`;
 }
 
 function padRow(label: string, value: string, width: number): string {
@@ -276,6 +279,8 @@ export function renderNonFiscalReceiptTicket(
   payload: NonFiscalReceiptPayload,
   options?: { layout?: unknown },
 ): NonFiscalReceiptRenderResult {
+  const currencyMark = normalizeReceiptLayout(options?.layout).currency === '€' ? '€' : 'EUR';
+  const money = (value: unknown) => formatCurrency(value, currencyMark);
   const layout = normalizeReceiptLayout(options?.layout);
   const metric = ticketFontMetrics(layout, layout.font);
   const dots = layout.printable_dots;
@@ -316,7 +321,8 @@ export function renderNonFiscalReceiptTicket(
   let previewField: string | undefined = 'header';
   const partialLabels=layout.partial_payment??DEFAULT_RECEIPT_LAYOUT.partial_payment!;
   const content = [restaurantName, tableLabel,layout.table.label, ...Object.values(layout.labels??{}), layout.header.custom_text, layout.footer.custom_text, ...(partial?[partialLabels.title,partialLabels.subtitle]:[]), ...ayceItems.map(item => item?.name ?? ''), ...(payload.extra_items ?? []).map(item => item?.name ?? '')].join(' ');
-  const rasterMode=receiptUsesRaster(layout) || /[^\x20-\x7e]/u.test(toStr(content));
+  // The euro sign is not in the printers' ASCII text set: print it as graphics.
+  const rasterMode=receiptUsesRaster(layout) || currencyMark === '€' || /[^\x20-\x7e]/u.test(toStr(content));
   const addLine = (text: string, type: AnnotatedLine["type"], pointSection?:keyof NonNullable<ReceiptLayoutConfig['sizes_pt']>,bold=false,right_text?:string) => {
     text = toStr(text);
     const section=pointSection??(type==='header'||type==='table'||type==='timestamp'||type==='footer'?type:'items');
@@ -425,22 +431,22 @@ export function renderNonFiscalReceiptTicket(
         if (kind === 'ayce' ? !layout.items.show_ayce : kind === 'cover' ? !layout.items.show_cover : !layout.items.show_extras) continue;
         layer = kind;
         previewField = kind;
-        addAmount(`${line.quantity}x ${toStr(line.name).trim()}`, formatCurrency(line.line_total));
-        if (line.quantity > 1 && Number.isFinite(line.unit_price) && Number(line.unit_price) > 0) addLine(`  ${formatCurrency(line.unit_price)} cad.`, 'item_sub');
+        addAmount(`${line.quantity}x ${toStr(line.name).trim()}`, money(line.line_total));
+        if (line.quantity > 1 && Number.isFinite(line.unit_price) && Number(line.unit_price) > 0) addLine(`  ${money(line.unit_price)} cad.`, 'item_sub');
       }
       layer='extras';
       previewField = 'extras';
       addSep();
-      addAmount('Totale tavolo', formatCurrency(tableBill.total));
-      if (saldoAfterPayments) addAmount("Gia' pagato", `-${formatCurrency(paidBefore)}`);
+      addAmount('Totale tavolo', money(tableBill.total));
+      if (saldoAfterPayments) addAmount("Gia' pagato", `-${money(paidBefore)}`);
       else if (billCovers > 0) {
         const perCents = Math.round(cents(tableBill.total) / billCovers);
-        if (Math.abs(perCents * personsAtPayment - cents(romanShareGross)) <= personsAtPayment) addAmount(`Diviso ${billCovers}`, `${formatCurrency(perCents / 100)} cad.`);
+        if (Math.abs(perCents * personsAtPayment - cents(romanShareGross)) <= personsAtPayment) addAmount(`Diviso ${billCovers}`, `${money(perCents / 100)} cad.`);
       }
     } else {
-      addAmount(title, formatCurrency(romanShareGross));
+      addAmount(title, money(romanShareGross));
       const shareCents = cents(romanShareGross);
-      if (personsAtPayment > 1 && shareCents % personsAtPayment === 0) addLine(`${formatCurrency(shareCents / personsAtPayment / 100)} cad.`, 'item_sub');
+      if (personsAtPayment > 1 && shareCents % personsAtPayment === 0) addLine(`${money(shareCents / personsAtPayment / 100)} cad.`, 'item_sub');
     }
     hasItems = true;
   }
@@ -451,10 +457,10 @@ export function renderNonFiscalReceiptTicket(
     ayceItems.reduce((total, item) => total + cents(item.line_total), 0) === cents(ayceTotal);
   if (layout.items.show_ayce && (ayceTotal > 0 || detailedAyce)) {
     if (detailedAyce) for (const item of ayceItems) {
-      addAmount(`${item.quantity}x ${toStr(item.name).trim()}`, formatCurrency(item.line_total));
-      if (item.quantity > 1) addLine(`${formatCurrency(item.unit_price)} cad.`, 'item_sub');
+      addAmount(`${item.quantity}x ${toStr(item.name).trim()}`, money(item.line_total));
+      if (item.quantity > 1) addLine(`${money(item.unit_price)} cad.`, 'item_sub');
     }
-    else addAmount(paymentScope === 'roman_split' ? 'Quota menu AYCE' : 'AYCE', formatCurrency(ayceTotal));
+    else addAmount(paymentScope === 'roman_split' ? 'Quota menu AYCE' : 'AYCE', money(ayceTotal));
     hasItems = true;
   }
   layer='extras';
@@ -469,19 +475,19 @@ export function renderNonFiscalReceiptTicket(
       items.reduce((total, item) => total + cents(item.line_total), 0) === cents(extrasTotal);
     if (valid) {
       for (const item of items) {
-        addAmount(`${item.quantity}x ${toStr(item.name).trim()}`, formatCurrency(item.line_total));
-        if (item.quantity > 1) addLine(`  ${formatCurrency(item.unit_price)} cad.`, 'item_sub');
+        addAmount(`${item.quantity}x ${toStr(item.name).trim()}`, money(item.line_total));
+        if (item.quantity > 1) addLine(`  ${money(item.unit_price)} cad.`, 'item_sub');
       }
-    } else addAmount(extrasLabel, formatCurrency(extrasTotal));
+    } else addAmount(extrasLabel, money(extrasTotal));
     hasItems = true;
   }
   layer='cover';
   previewField = 'cover';
   if (layout.items.show_cover && coverTotal > 0) {
     if (validItem(coverItem) && cents(coverItem.line_total) === cents(coverTotal)) {
-      addAmount(`${coverItem.quantity}x Coperto`, formatCurrency(coverTotal));
-      if (coverItem.quantity > 1) addLine(`${formatCurrency(coverItem.unit_price)} cad.`, 'item_sub');
-    } else addAmount("Coperto", formatCurrency(coverTotal));
+      addAmount(`${coverItem.quantity}x Coperto`, money(coverTotal));
+      if (coverItem.quantity > 1) addLine(`${money(coverItem.unit_price)} cad.`, 'item_sub');
+    } else addAmount("Coperto", money(coverTotal));
     hasItems = true;
   }
   }
@@ -489,7 +495,7 @@ export function renderNonFiscalReceiptTicket(
   previewField = undefined;
   layer='discount';
   if (Number.isFinite(payload.discount_total) && Number(payload.discount_total) > 0) {
-    addAmount('Sconto', `-${formatCurrency(payload.discount_total)}`);
+    addAmount('Sconto', `-${money(payload.discount_total)}`);
     addSep();
   }
 
@@ -498,7 +504,7 @@ export function renderNonFiscalReceiptTicket(
   previewField = 'total';
   if (layout.total.visible) {
     const totalLabel = layout.labels?.total ?? (shareReceipt && tableBill ? (preBill ? 'QUOTA' : 'QUOTA PAGATA') : 'TOTALE');
-    addLine(totalLabel, 'item', 'total', true, formatCurrency(totalAmount));
+    addLine(totalLabel, 'item', 'total', true, money(totalAmount));
     layer='payment';
   previewField = 'payment';
   if (layout.total.show_payment_method && paymentLabel) {
@@ -510,7 +516,7 @@ export function renderNonFiscalReceiptTicket(
   if (partial) {
     layer='residual';
     previewField = undefined;
-    addAmount(layout.labels?.residual??'Residuo dopo pagamento', formatCurrency(remaining));
+    addAmount(layout.labels?.residual??'Residuo dopo pagamento', money(remaining));
     addSep();
   }
 
