@@ -186,7 +186,10 @@ export interface ReceiptBreakdown {
   ayce_items: ReceiptBreakdownItem[];
   cover_item?: ReceiptBreakdownItem | null;
   amount_due_after?: number;
+  /** Equal split: what this share pays, with fractional quantities (x0,25). */
+  share_lines?: ReceiptShareLine[] | null;
 }
+export interface ReceiptShareLine { kind?: string; name: string; quantity: number; unit_price: number; line_total: number }
 export interface NonFiscalReceiptPayload {
   layout_test?: boolean;
   receipt_breakdown?: ReceiptBreakdown | null;
@@ -385,15 +388,43 @@ export function renderNonFiscalReceiptTicket(
 
   // Items breakdown
   let hasItems = false;
-  // Equal split: print only the shares paid. Menus, promotions, supplements,
-  // drinks and covers are divided evenly, so listing them would be misleading.
+  // Equal split: "Pagamento N quote", then what the shares pay — menu, dishes
+  // and drinks with their fraction (EUR 2,60 x0,25) and the covers. Without a
+  // reconciled breakdown only the share amount is printed.
   const romanShareGross = ayceTotal + extrasTotal + coverTotal;
   if (paymentScope === 'roman_split' && romanShareGross > 0 && (layout.items.show_ayce || layout.items.show_extras || layout.items.show_cover)) {
+    const shareLabel = `Pagamento ${personsAtPayment} ${personsAtPayment === 1 ? 'quota' : 'quote'}`;
+    const shareLines = Array.isArray(breakdown?.share_lines) ? breakdown.share_lines : [];
+    const detailedShare = shareLines.length > 0 && shareLines.every(line => Boolean(line && toStr(line.name).trim() &&
+      Number.isFinite(line.quantity) && line.quantity > 0 && Number.isFinite(line.unit_price) && line.unit_price > 0 &&
+      Number.isFinite(line.line_total) && line.line_total >= 0)) &&
+      shareLines.reduce((total, line) => total + cents(line.line_total), 0) === cents(ayceTotal + extrasTotal);
     layer='extras';
     previewField = 'extras';
-    addAmount(`${personsAtPayment}x Quota alla romana`, formatCurrency(romanShareGross));
-    const shareCents = cents(romanShareGross);
-    if (personsAtPayment > 1 && shareCents % personsAtPayment === 0) addLine(`${formatCurrency(shareCents / personsAtPayment / 100)} cad.`, 'item_sub');
+    if (detailedShare) {
+      addLine(shareLabel, 'item', 'items', true);
+      const fraction = (value: number) => String(Math.round(value * 100) / 100).replace('.', ',');
+      for (const line of shareLines) {
+        const ayceLine = line.kind === 'ayce';
+        if (ayceLine ? !layout.items.show_ayce : !layout.items.show_extras) continue;
+        layer = ayceLine ? 'ayce' : 'extras';
+        previewField = layer;
+        addAmount(toStr(line.name).trim(), formatCurrency(line.line_total));
+        addLine(`  ${formatCurrency(line.unit_price)} x${fraction(line.quantity)}`, 'item_sub');
+      }
+      layer='cover';
+      previewField = 'cover';
+      if (layout.items.show_cover && coverTotal > 0) {
+        if (validItem(coverItem) && cents(coverItem.line_total) === cents(coverTotal)) {
+          addAmount(`${coverItem.quantity}x Coperto`, formatCurrency(coverTotal));
+          if (coverItem.quantity > 1) addLine(`${formatCurrency(coverItem.unit_price)} cad.`, 'item_sub');
+        } else addAmount('Coperto', formatCurrency(coverTotal));
+      }
+    } else {
+      addAmount(shareLabel, formatCurrency(romanShareGross));
+      const shareCents = cents(romanShareGross);
+      if (personsAtPayment > 1 && shareCents % personsAtPayment === 0) addLine(`${formatCurrency(shareCents / personsAtPayment / 100)} cad.`, 'item_sub');
+    }
     hasItems = true;
   }
   if (paymentScope !== 'roman_split') {
