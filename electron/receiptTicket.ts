@@ -385,6 +385,18 @@ export function renderNonFiscalReceiptTicket(
 
   // Items breakdown
   let hasItems = false;
+  // Equal split: print only the shares paid. Menus, promotions, supplements,
+  // drinks and covers are divided evenly, so listing them would be misleading.
+  const romanShareGross = ayceTotal + extrasTotal + coverTotal;
+  if (paymentScope === 'roman_split' && romanShareGross > 0 && (layout.items.show_ayce || layout.items.show_extras || layout.items.show_cover)) {
+    layer='extras';
+    previewField = 'extras';
+    addAmount(`${personsAtPayment}x Quota alla romana`, formatCurrency(romanShareGross));
+    const shareCents = cents(romanShareGross);
+    if (personsAtPayment > 1 && shareCents % personsAtPayment === 0) addLine(`${formatCurrency(shareCents / personsAtPayment / 100)} cad.`, 'item_sub');
+    hasItems = true;
+  }
+  if (paymentScope !== 'roman_split') {
   layer='ayce';
   previewField = 'ayce';
   const detailedAyce = ayceItems.length > 0 && ayceItems.every(validItem) &&
@@ -423,6 +435,7 @@ export function renderNonFiscalReceiptTicket(
       if (coverItem.quantity > 1) addLine(`${formatCurrency(coverItem.unit_price)} cad.`, 'item_sub');
     } else addAmount("Coperto", formatCurrency(coverTotal));
     hasItems = true;
+  }
   }
   if (hasItems) addSep();
   previewField = undefined;
