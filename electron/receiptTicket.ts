@@ -192,6 +192,8 @@ export interface ReceiptBreakdown {
 export interface ReceiptShareLine { kind?: string; name: string; quantity: number; unit_price: number; line_total: number }
 export interface NonFiscalReceiptPayload {
   layout_test?: boolean;
+  /** Preconto: the bill being prepared, printed before any payment is recorded. */
+  pre_bill?: boolean;
   receipt_breakdown?: ReceiptBreakdown | null;
   restaurant_name?: string;
   table_number?: string | number | null;
@@ -282,7 +284,8 @@ export function renderNonFiscalReceiptTicket(
   const sepDouble = "=".repeat(width);
 
   const restaurantName = toStr(payload.restaurant_name).trim() || "Il Tuo Ristorante";
-  const tableLabel = toStr(payload.table_number).trim() || "-";
+  const preBill = payload.pre_bill === true;
+  const tableLabel = (preBill ? toStr(payload.table_number).replace(/ - PRECONTO$/, '') : toStr(payload.table_number)).trim() || "-";
   const paidAt = formatTimestamp(payload.paid_at);
   const paymentMethod = normalizePaymentMethod(payload.payment_method);
   const paymentLabel = paymentMethod === "cash" ? "Contanti" : paymentMethod === "card" ? "Carta" : null;
@@ -296,7 +299,7 @@ export function renderNonFiscalReceiptTicket(
   const ayceItems = Array.isArray(breakdown?.ayce_items) ? breakdown.ayce_items : [];
   const coverItem = breakdown?.cover_item;
   const remaining = breakdown?.amount_due_after;
-  const partial = typeof remaining === 'number' && Number.isFinite(remaining) && remaining > 0;
+  const partial = !preBill && typeof remaining === 'number' && Number.isFinite(remaining) && remaining > 0;
   const cents = (value: number) => Math.round(value * 100);
   const validItem = (item: ReceiptBreakdownItem | null | undefined): item is ReceiptBreakdownItem => Boolean(item &&
     toStr(item.name).trim() && Number.isSafeInteger(item.quantity) && item.quantity > 0 && item.quantity <= 1000 &&
@@ -344,6 +347,13 @@ export function renderNonFiscalReceiptTicket(
     addLine(centerText('*** PROVA STAMPA ***', width), 'header', 'header', true);
     addLine(centerText('DATI DI ESEMPIO', width), 'header');
     addSep('=');
+  }
+  if (preBill) {
+    layer='partial_title';
+    addLine(centerText('PRECONTO', width), 'header', 'header', true);
+    layer='partial_subtitle';
+    addLine(centerText('Conto da pagare', width), 'header');
+    addSep();
   }
   if (partial) {
     layer='partial_title';
@@ -393,7 +403,7 @@ export function renderNonFiscalReceiptTicket(
   // reconciled breakdown only the share amount is printed.
   const romanShareGross = ayceTotal + extrasTotal + coverTotal;
   if (paymentScope === 'roman_split' && romanShareGross > 0 && (layout.items.show_ayce || layout.items.show_extras || layout.items.show_cover)) {
-    const shareLabel = `Pagamento ${personsAtPayment} ${personsAtPayment === 1 ? 'quota' : 'quote'}`;
+    const shareLabel = `${preBill ? 'Conto' : 'Pagamento'} ${personsAtPayment} ${personsAtPayment === 1 ? 'quota' : 'quote'}`;
     const shareLines = Array.isArray(breakdown?.share_lines) ? breakdown.share_lines : [];
     const detailedShare = shareLines.length > 0 && shareLines.every(line => Boolean(line && toStr(line.name).trim() &&
       Number.isFinite(line.quantity) && line.quantity > 0 && Number.isFinite(line.unit_price) && line.unit_price > 0 &&
