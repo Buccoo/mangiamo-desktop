@@ -30,6 +30,8 @@ export interface ReceiptLayoutConfig {
     show_cover: boolean;
     show_extras: boolean;
     show_extra_details?: boolean;
+    /** Share/saldo receipts: list the whole table bill (default: only the amount paid now). */
+    show_table_bill?: boolean;
   };
   total: {
     visible: boolean;
@@ -154,6 +156,7 @@ export function normalizeReceiptLayout(raw: unknown): ReceiptLayoutConfig {
       show_cover: it.show_cover !== false,
       show_extras: it.show_extras !== false,
       show_extra_details: it.show_extra_details !== false,
+      ...(it.show_table_bill === true ? { show_table_bill: true } : {}),
     },
     total: {
       visible: tot.visible !== false,
@@ -417,13 +420,16 @@ export function renderNonFiscalReceiptTicket(
   const paidBefore = tableBill && Number.isFinite(tableBill.paid_before) ? Number(tableBill.paid_before) : 0;
   const saldoAfterPayments = paymentScope === 'full_total' && tableBill !== null && paidBefore > 0;
   const shareReceipt = paymentScope === 'roman_split' && romanShareGross > 0;
+  // Default: a share (or a saldo after shares) shows only what this guest pays.
+  const detailedBill = Boolean(tableBill && layout.items.show_table_bill);
+  const compactShare = (shareReceipt || saldoAfterPayments) && !detailedBill;
   if ((shareReceipt || saldoAfterPayments) && (layout.items.show_ayce || layout.items.show_extras || layout.items.show_cover)) {
     layer='extras';
     previewField = 'extras';
     const shareWord = personsAtPayment === 1 ? 'quota' : 'quote';
     const title = saldoAfterPayments ? (preBill ? 'Conto da saldare' : 'Saldo conto')
       : `${preBill ? 'Conto' : 'Pagamento'} ${personsAtPayment} ${shareWord}${billCovers >= personsAtPayment ? ` su ${billCovers}` : ''}`;
-    if (tableBill) {
+    if (tableBill && detailedBill) {
       addLine(title, 'item', 'items', true);
       addLine('Conto tavolo', 'item_sub');
       for (const line of tableBill.lines) {
@@ -444,9 +450,7 @@ export function renderNonFiscalReceiptTicket(
         if (Math.abs(perCents * personsAtPayment - cents(romanShareGross)) <= personsAtPayment) addAmount(`Diviso ${billCovers}`, `${money(perCents / 100)} cad.`);
       }
     } else {
-      addAmount(title, money(romanShareGross));
-      const shareCents = cents(romanShareGross);
-      if (personsAtPayment > 1 && shareCents % personsAtPayment === 0) addLine(`${money(shareCents / personsAtPayment / 100)} cad.`, 'item_sub');
+      addAmount(saldoAfterPayments ? title : `${personsAtPayment} ${shareWord}${billCovers >= personsAtPayment ? ` su ${billCovers}` : ''}`, money(totalAmount));
     }
     hasItems = true;
   }
@@ -494,7 +498,7 @@ export function renderNonFiscalReceiptTicket(
   if (hasItems) addSep();
   previewField = undefined;
   layer='discount';
-  if (Number.isFinite(payload.discount_total) && Number(payload.discount_total) > 0) {
+  if (!compactShare && Number.isFinite(payload.discount_total) && Number(payload.discount_total) > 0) {
     addAmount('Sconto', `-${money(payload.discount_total)}`);
     addSep();
   }
@@ -503,7 +507,7 @@ export function renderNonFiscalReceiptTicket(
   layer='total';
   previewField = 'total';
   if (layout.total.visible) {
-    const totalLabel = layout.labels?.total ?? (shareReceipt && tableBill ? (preBill ? 'QUOTA' : 'QUOTA PAGATA') : 'TOTALE');
+    const totalLabel = layout.labels?.total ?? (shareReceipt && detailedBill ? (preBill ? 'QUOTA' : 'QUOTA PAGATA') : 'TOTALE');
     addLine(totalLabel, 'item', 'total', true, money(totalAmount));
     layer='payment';
   previewField = 'payment';
@@ -513,7 +517,7 @@ export function renderNonFiscalReceiptTicket(
     addSep("=");
   }
 
-  if (partial) {
+  if (partial && !compactShare) {
     layer='residual';
     previewField = undefined;
     addAmount(layout.labels?.residual??'Residuo dopo pagamento', money(remaining));
