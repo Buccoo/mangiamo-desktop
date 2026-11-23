@@ -189,7 +189,7 @@ export interface ReceiptBreakdown {
   /** Whole table bill (whole quantities) printed on share receipts and on a saldo after earlier payments. */
   table_bill?: ReceiptTableBill | null;
 }
-export interface ReceiptTableBillLine { kind?: string; name: string; quantity: number; line_total: number }
+export interface ReceiptTableBillLine { kind?: string; name: string; quantity: number; unit_price?: number; line_total: number }
 export interface ReceiptTableBill { lines: ReceiptTableBillLine[]; total: number; covers?: number; paid_before?: number }
 export interface NonFiscalReceiptPayload {
   layout_test?: boolean;
@@ -426,6 +426,7 @@ export function renderNonFiscalReceiptTicket(
         layer = kind;
         previewField = kind;
         addAmount(`${line.quantity}x ${toStr(line.name).trim()}`, formatCurrency(line.line_total));
+        if (line.quantity > 1 && Number.isFinite(line.unit_price) && Number(line.unit_price) > 0) addLine(`  ${formatCurrency(line.unit_price)} cad.`, 'item_sub');
       }
       layer='extras';
       previewField = 'extras';
