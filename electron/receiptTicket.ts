@@ -10,8 +10,8 @@ export interface ReceiptLayoutConfig {
   labels?: Partial<Record<'disclaimer'|'total'|'payment'|'residual'|'non_fiscal',string>>;
   partial_payment?: { title: string; subtitle: string };
   render_mode?: TicketRenderMode;
-  /** Currency mark on amounts: "EUR 17,90" (default) or "€ 17,90" (printed as graphics). */
-  currency?: 'EUR' | '€';
+  /** Currency mark on amounts: "EUR 17,90" (default) or "â‚¬ 17,90" (printed as graphics). */
+  currency?: 'EUR' | 'â‚¬';
   native_profile?: 'custom-kube-ii';
   header: {
     visible: boolean;
@@ -131,10 +131,10 @@ export function normalizeReceiptLayout(raw: unknown): ReceiptLayoutConfig {
     ...(Object.keys(layerStyles).length?{layer_styles:layerStyles}:{}),
     ...(Object.keys(labels).length?{labels}:{}),
     ...(Array.isArray(r.layer_order)?{layer_order:[...new Set([...r.layer_order.filter((key):key is ReceiptLayer=>RECEIPT_LAYER_ORDER.includes(key as ReceiptLayer)),...RECEIPT_LAYER_ORDER])]}:{}),
-    ...(Array.isArray(r.hidden_layers)?{hidden_layers:[...new Set(r.hidden_layers.filter((key):key is ReceiptLayer=>RECEIPT_LAYER_ORDER.includes(key as ReceiptLayer)&&key!=='residual'&&key!=='discount'))]}:{}),
+    ...(Array.isArray(r.hidden_layers)?{hidden_layers:[...new Set(r.hidden_layers.filter((key):key is ReceiptLayer=>RECEIPT_LAYER_ORDER.includes(key as ReceiptLayer)&&key!=='discount'))]}:{}),
     partial_payment: { title: partialText(partial.title,d.partial_payment!.title), subtitle: partialText(partial.subtitle,d.partial_payment!.subtitle) },
     ...(r.native_profile === 'custom-kube-ii' ? { native_profile: 'custom-kube-ii' as const } : {}),
-    ...(r.currency === '€' ? { currency: '€' as const } : {}),
+    ...(r.currency === 'â‚¬' ? { currency: 'â‚¬' as const } : {}),
     ...(r.render_mode === 'native' || r.render_mode === 'raster' ? { render_mode: r.render_mode } : {}),
     ...(Object.keys(sizes).length?{sizes_pt:sizes}:{}),
     ...(r.printable_dots!=null||Object.keys(sizes).length||r.render_mode==='raster'?{printable_dots:([360,384,512,576,960].includes(Number(r.printable_dots))?Number(r.printable_dots):Number(r.width)===32?384:Number(r.width)===80?960:576) as 360|384|512|576|960}:{}),
@@ -282,7 +282,7 @@ export function renderNonFiscalReceiptTicket(
   payload: NonFiscalReceiptPayload,
   options?: { layout?: unknown },
 ): NonFiscalReceiptRenderResult {
-  const currencyMark = normalizeReceiptLayout(options?.layout).currency === '€' ? '€' : 'EUR';
+  const currencyMark = normalizeReceiptLayout(options?.layout).currency === 'â‚¬' ? 'â‚¬' : 'EUR';
   const money = (value: unknown) => formatCurrency(value, currencyMark);
   const layout = normalizeReceiptLayout(options?.layout);
   const metric = ticketFontMetrics(layout, layout.font);
@@ -325,7 +325,7 @@ export function renderNonFiscalReceiptTicket(
   const partialLabels=layout.partial_payment??DEFAULT_RECEIPT_LAYOUT.partial_payment!;
   const content = [restaurantName, tableLabel,layout.table.label, ...Object.values(layout.labels??{}), layout.header.custom_text, layout.footer.custom_text, ...(partial?[partialLabels.title,partialLabels.subtitle]:[]), ...ayceItems.map(item => item?.name ?? ''), ...(payload.extra_items ?? []).map(item => item?.name ?? '')].join(' ');
   // The euro sign is not in the printers' ASCII text set: print it as graphics.
-  const rasterMode=receiptUsesRaster(layout) || currencyMark === '€' || /[^\x20-\x7e]/u.test(toStr(content));
+  const rasterMode=receiptUsesRaster(layout) || currencyMark === 'â‚¬' || /[^\x20-\x7e]/u.test(toStr(content));
   const addLine = (text: string, type: AnnotatedLine["type"], pointSection?:keyof NonNullable<ReceiptLayoutConfig['sizes_pt']>,bold=false,right_text?:string) => {
     text = toStr(text);
     const section=pointSection??(type==='header'||type==='table'||type==='timestamp'||type==='footer'?type:'items');
@@ -409,8 +409,8 @@ export function renderNonFiscalReceiptTicket(
   // Items breakdown
   let hasItems = false;
   // Equal split and saldo after earlier payments: "Pagamento 1 quota su 4", the
-  // whole table bill with whole quantities, "Totale tavolo", "Diviso 4 … cad."
-  // (or "Già pagato"), then the amount paid now. No fractional lines.
+  // whole table bill with whole quantities, "Totale tavolo", "Diviso 4 â€¦ cad."
+  // (or "GiÃ  pagato"), then the amount paid now. No fractional lines.
   const romanShareGross = ayceTotal + extrasTotal + coverTotal;
   const rawBill = breakdown?.table_bill;
   const tableBill = rawBill && Array.isArray(rawBill.lines) && rawBill.lines.length > 0 && Number.isFinite(rawBill.total)
@@ -513,7 +513,7 @@ export function renderNonFiscalReceiptTicket(
     addSep("=");
   }
 
-  if (partial && !compactShare) {
+  if (partial && !compactShare && !layout.hidden_layers?.includes('residual')) {
     layer='residual';
     previewField = undefined;
     addAmount(layout.labels?.residual??'Residuo dopo pagamento', money(remaining));
