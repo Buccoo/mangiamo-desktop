@@ -437,8 +437,7 @@ export function renderNonFiscalReceiptTicket(
         if (kind === 'ayce' ? !layout.items.show_ayce : kind === 'cover' ? !layout.items.show_cover : !layout.items.show_extras) continue;
         layer = kind;
         previewField = kind;
-        addAmount(`${line.quantity}x ${toStr(line.name).trim()}`, money(line.line_total));
-        if (line.quantity > 1 && Number.isFinite(line.unit_price) && Number(line.unit_price) > 0) addLine(`  ${money(line.unit_price)} cad.`, 'item_sub');
+        addAmount(`${line.quantity}x ${toStr(line.name).trim()}${line.quantity > 1 && Number.isFinite(line.unit_price) && Number(line.unit_price) > 0 ? ` (${money(line.unit_price)})` : ''}`, money(line.line_total));
       }
       layer='extras';
       previewField = 'extras';
@@ -461,8 +460,7 @@ export function renderNonFiscalReceiptTicket(
     ayceItems.reduce((total, item) => total + cents(item.line_total), 0) === cents(ayceTotal);
   if (layout.items.show_ayce && (ayceTotal > 0 || detailedAyce)) {
     if (detailedAyce) for (const item of ayceItems) {
-      addAmount(`${item.quantity}x ${toStr(item.name).trim()}`, money(item.line_total));
-      if (item.quantity > 1) addLine(`${money(item.unit_price)} cad.`, 'item_sub');
+      addAmount(`${item.quantity}x ${toStr(item.name).trim()}${item.quantity > 1 ? ` (${money(item.unit_price)})` : ''}`, money(item.line_total));
     }
     else addAmount(paymentScope === 'roman_split' ? 'Quota menu AYCE' : 'AYCE', money(ayceTotal));
     hasItems = true;
@@ -479,8 +477,7 @@ export function renderNonFiscalReceiptTicket(
       items.reduce((total, item) => total + cents(item.line_total), 0) === cents(extrasTotal);
     if (valid) {
       for (const item of items) {
-        addAmount(`${item.quantity}x ${toStr(item.name).trim()}`, money(item.line_total));
-        if (item.quantity > 1) addLine(`  ${money(item.unit_price)} cad.`, 'item_sub');
+        addAmount(`${item.quantity}x ${toStr(item.name).trim()}${item.quantity > 1 ? ` (${money(item.unit_price)})` : ''}`, money(item.line_total));
       }
     } else addAmount(extrasLabel, money(extrasTotal));
     hasItems = true;
@@ -489,8 +486,7 @@ export function renderNonFiscalReceiptTicket(
   previewField = 'cover';
   if (layout.items.show_cover && coverTotal > 0) {
     if (validItem(coverItem) && cents(coverItem.line_total) === cents(coverTotal)) {
-      addAmount(`${coverItem.quantity}x Coperto`, money(coverTotal));
-      if (coverItem.quantity > 1) addLine(`${money(coverItem.unit_price)} cad.`, 'item_sub');
+      addAmount(`${coverItem.quantity}x Coperto${coverItem.quantity > 1 ? ` (${money(coverItem.unit_price)})` : ''}`, money(coverTotal));
     } else addAmount("Coperto", money(coverTotal));
     hasItems = true;
   }
