@@ -186,10 +186,11 @@ export interface ReceiptBreakdown {
   ayce_items: ReceiptBreakdownItem[];
   cover_item?: ReceiptBreakdownItem | null;
   amount_due_after?: number;
-  /** Equal split: what this share pays, with fractional quantities (x0,25). */
-  share_lines?: ReceiptShareLine[] | null;
+  /** Whole table bill (whole quantities) printed on share receipts and on a saldo after earlier payments. */
+  table_bill?: ReceiptTableBill | null;
 }
-export interface ReceiptShareLine { kind?: string; name: string; quantity: number; unit_price: number; line_total: number }
+export interface ReceiptTableBillLine { kind?: string; name: string; quantity: number; line_total: number }
+export interface ReceiptTableBill { lines: ReceiptTableBillLine[]; total: number; covers?: number; paid_before?: number }
 export interface NonFiscalReceiptPayload {
   layout_test?: boolean;
   /** Preconto: the bill being prepared, printed before any payment is recorded. */
@@ -398,46 +399,51 @@ export function renderNonFiscalReceiptTicket(
 
   // Items breakdown
   let hasItems = false;
-  // Equal split: "Pagamento N quote", then what the shares pay — menu, dishes
-  // and drinks with their fraction (EUR 2,60 x0,25) and the covers. Without a
-  // reconciled breakdown only the share amount is printed.
+  // Equal split and saldo after earlier payments: "Pagamento 1 quota su 4", the
+  // whole table bill with whole quantities, "Totale tavolo", "Diviso 4 … cad."
+  // (or "Già pagato"), then the amount paid now. No fractional lines.
   const romanShareGross = ayceTotal + extrasTotal + coverTotal;
-  if (paymentScope === 'roman_split' && romanShareGross > 0 && (layout.items.show_ayce || layout.items.show_extras || layout.items.show_cover)) {
-    const shareLabel = `${preBill ? 'Conto' : 'Pagamento'} ${personsAtPayment} ${personsAtPayment === 1 ? 'quota' : 'quote'}`;
-    const shareLines = Array.isArray(breakdown?.share_lines) ? breakdown.share_lines : [];
-    const detailedShare = shareLines.length > 0 && shareLines.every(line => Boolean(line && toStr(line.name).trim() &&
-      Number.isFinite(line.quantity) && line.quantity > 0 && Number.isFinite(line.unit_price) && line.unit_price > 0 &&
-      Number.isFinite(line.line_total) && line.line_total >= 0)) &&
-      shareLines.reduce((total, line) => total + cents(line.line_total), 0) === cents(ayceTotal + extrasTotal);
+  const rawBill = breakdown?.table_bill;
+  const tableBill = rawBill && Array.isArray(rawBill.lines) && rawBill.lines.length > 0 && Number.isFinite(rawBill.total)
+    && rawBill.lines.every(line => Boolean(line && toStr(line.name).trim() && Number.isSafeInteger(line.quantity) && line.quantity > 0 && Number.isFinite(line.line_total) && line.line_total >= 0))
+    && rawBill.lines.reduce((total, line) => total + cents(line.line_total), 0) === cents(rawBill.total) ? rawBill : null;
+  const billCovers = tableBill && Number.isSafeInteger(tableBill.covers) && Number(tableBill.covers) > 0 ? Number(tableBill.covers) : 0;
+  const paidBefore = tableBill && Number.isFinite(tableBill.paid_before) ? Number(tableBill.paid_before) : 0;
+  const saldoAfterPayments = paymentScope === 'full_total' && tableBill !== null && paidBefore > 0;
+  const shareReceipt = paymentScope === 'roman_split' && romanShareGross > 0;
+  if ((shareReceipt || saldoAfterPayments) && (layout.items.show_ayce || layout.items.show_extras || layout.items.show_cover)) {
     layer='extras';
     previewField = 'extras';
-    if (detailedShare) {
-      addLine(shareLabel, 'item', 'items', true);
-      const fraction = (value: number) => String(Math.round(value * 100) / 100).replace('.', ',');
-      for (const line of shareLines) {
-        const ayceLine = line.kind === 'ayce';
-        if (ayceLine ? !layout.items.show_ayce : !layout.items.show_extras) continue;
-        layer = ayceLine ? 'ayce' : 'extras';
-        previewField = layer;
-        addAmount(toStr(line.name).trim(), formatCurrency(line.line_total));
-        addLine(`  ${formatCurrency(line.unit_price)} x${fraction(line.quantity)}`, 'item_sub');
+    const shareWord = personsAtPayment === 1 ? 'quota' : 'quote';
+    const title = saldoAfterPayments ? (preBill ? 'Conto da saldare' : 'Saldo conto')
+      : `${preBill ? 'Conto' : 'Pagamento'} ${personsAtPayment} ${shareWord}${billCovers >= personsAtPayment ? ` su ${billCovers}` : ''}`;
+    if (tableBill) {
+      addLine(title, 'item', 'items', true);
+      addLine('Conto tavolo', 'item_sub');
+      for (const line of tableBill.lines) {
+        const kind = line.kind === 'ayce' ? 'ayce' : line.kind === 'cover' ? 'cover' : 'extras';
+        if (kind === 'ayce' ? !layout.items.show_ayce : kind === 'cover' ? !layout.items.show_cover : !layout.items.show_extras) continue;
+        layer = kind;
+        previewField = kind;
+        addAmount(`${line.quantity}x ${toStr(line.name).trim()}`, formatCurrency(line.line_total));
       }
-      layer='cover';
-      previewField = 'cover';
-      if (layout.items.show_cover && coverTotal > 0) {
-        if (validItem(coverItem) && cents(coverItem.line_total) === cents(coverTotal)) {
-          addAmount(`${coverItem.quantity}x Coperto`, formatCurrency(coverTotal));
-          if (coverItem.quantity > 1) addLine(`${formatCurrency(coverItem.unit_price)} cad.`, 'item_sub');
-        } else addAmount('Coperto', formatCurrency(coverTotal));
+      layer='extras';
+      previewField = 'extras';
+      addSep();
+      addAmount('Totale tavolo', formatCurrency(tableBill.total));
+      if (saldoAfterPayments) addAmount("Gia' pagato", `-${formatCurrency(paidBefore)}`);
+      else if (billCovers > 0) {
+        const perCents = Math.round(cents(tableBill.total) / billCovers);
+        if (Math.abs(perCents * personsAtPayment - cents(romanShareGross)) <= personsAtPayment) addAmount(`Diviso ${billCovers}`, `${formatCurrency(perCents / 100)} cad.`);
       }
     } else {
-      addAmount(shareLabel, formatCurrency(romanShareGross));
+      addAmount(title, formatCurrency(romanShareGross));
       const shareCents = cents(romanShareGross);
       if (personsAtPayment > 1 && shareCents % personsAtPayment === 0) addLine(`${formatCurrency(shareCents / personsAtPayment / 100)} cad.`, 'item_sub');
     }
     hasItems = true;
   }
-  if (paymentScope !== 'roman_split') {
+  if (!shareReceipt && !(saldoAfterPayments && (layout.items.show_ayce || layout.items.show_extras || layout.items.show_cover))) {
   layer='ayce';
   previewField = 'ayce';
   const detailedAyce = ayceItems.length > 0 && ayceItems.every(validItem) &&
@@ -490,8 +496,8 @@ export function renderNonFiscalReceiptTicket(
   layer='total';
   previewField = 'total';
   if (layout.total.visible) {
-    if(rasterMode)addLine(layout.labels?.total??"TOTALE",'item','total',true,formatCurrency(totalAmount));
-    else addLine(layout.labels?.total??"TOTALE", "item", "total", true, formatCurrency(totalAmount));
+    const totalLabel = layout.labels?.total ?? (shareReceipt && tableBill ? (preBill ? 'QUOTA' : 'QUOTA PAGATA') : 'TOTALE');
+    addLine(totalLabel, 'item', 'total', true, formatCurrency(totalAmount));
     layer='payment';
   previewField = 'payment';
   if (layout.total.show_payment_method && paymentLabel) {
