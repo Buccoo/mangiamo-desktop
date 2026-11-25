@@ -3,10 +3,16 @@ import type { AnnotatedLine, EscPosFont, TicketRenderMode,TicketTextStyle } from
 export function receiptUsesRaster(layout: Pick<ReceiptLayoutConfig, 'render_mode' | 'sizes_pt'|'layer_styles'>) {
   return layout.render_mode === 'raster' || layout.render_mode !== 'native' && (Object.keys(layout.sizes_pt ?? {}).length > 0||Object.values(layout.layer_styles??{}).some(style=>style?.size_pt!=null));
 }
+export type ReceiptSeparatorsMode = 'all' | 'sections' | 'none';
+export type ReceiptLayerStyle = TicketTextStyle & {
+  separator_after?: boolean;
+  separator_before?: boolean;
+};
 export interface ReceiptLayoutConfig {
   layer_order?: ReceiptLayer[];
   hidden_layers?: ReceiptLayer[];
-  layer_styles?: Partial<Record<ReceiptLayer,Partial<TicketTextStyle>>>;
+  layer_styles?: Partial<Record<ReceiptLayer,Partial<ReceiptLayerStyle>>>;
+  separators?: ReceiptSeparatorsMode;
   labels?: Partial<Record<'disclaimer'|'total'|'payment'|'residual'|'non_fiscal',string>>;
   partial_payment?: { title: string; subtitle: string };
   render_mode?: TicketRenderMode;
@@ -55,13 +61,56 @@ export interface ReceiptLayoutConfig {
 export const RECEIPT_LAYER_ORDER = ['partial_title','partial_subtitle','header','header_text','disclaimer','table','timestamp','share_title','ayce','extras','cover','table_total','discount','total','payment','residual','footer','non_fiscal'] as const;
 export type ReceiptLayer = typeof RECEIPT_LAYER_ORDER[number];
 
+export function receiptSeparatorGroup(layer: ReceiptLayer): 'partial' | 'top' | 'items' | 'subtotal' | 'total' | 'footer' {
+  if (layer === 'partial_title' || layer === 'partial_subtitle') return 'partial';
+  if (['header', 'header_text', 'disclaimer', 'table', 'timestamp'].includes(layer)) return 'top';
+  if (['share_title', 'ayce', 'extras', 'cover'].includes(layer)) return 'items';
+  if (layer === 'table_total' || layer === 'discount') return 'subtotal';
+  if (layer === 'total' || layer === 'payment' || layer === 'residual') return 'total';
+  return 'footer';
+}
+export function receiptLinesHasSeparatorAfter(lines: readonly Pick<AnnotatedLine, 'type' | 'preview_layer'>[], layer: ReceiptLayer): boolean {
+  let seen = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.type !== 'separator' && line.type !== 'blank') {
+      if (line.preview_layer === layer) { seen = true; continue; }
+      if (seen) return false;
+    } else if (seen && line.type === 'separator') {
+      return true;
+    }
+  }
+  return false;
+}
+export type ReceiptSeparatorTarget = { layer: ReceiptLayer; edge: 'after' | 'before' };
+export function receiptSeparatorTarget(lines: readonly Pick<AnnotatedLine, 'type' | 'preview_layer'>[], index: number): ReceiptSeparatorTarget | null {
+  if (lines[index]?.type !== 'separator') return null;
+  let prev: Pick<AnnotatedLine, 'type' | 'preview_layer'> | undefined;
+  for (let i = index - 1; i >= 0; i--) {
+    if (lines[i].type !== 'separator' && lines[i].type !== 'blank') { prev = lines[i]; break; }
+  }
+  if (prev && !prev.preview_layer) return null;
+  if (prev?.preview_layer && RECEIPT_LAYER_ORDER.includes(prev.preview_layer as ReceiptLayer)) {
+    return { layer: prev.preview_layer as ReceiptLayer, edge: 'after' };
+  }
+  for (let i = index + 1; i < lines.length; i++) {
+    if (lines[i].type !== 'separator' && lines[i].type !== 'blank') {
+      const nextLayer = lines[i].preview_layer;
+      if (nextLayer && RECEIPT_LAYER_ORDER.includes(nextLayer as ReceiptLayer)) {
+        return { layer: nextLayer as ReceiptLayer, edge: 'before' };
+      }
+      break;
+    }
+  }
+  return null;
+}
 export function receiptLayerSection(layer:ReceiptLayer):keyof NonNullable<ReceiptLayoutConfig['sizes_pt']>{
  if(['partial_title','partial_subtitle','header','header_text','disclaimer'].includes(layer))return 'header';
  if(layer==='footer'||layer==='non_fiscal')return 'footer';
  if(layer==='table'||layer==='timestamp'||layer==='total')return layer;
  return 'items';
 }
-export function receiptLayerStyle(layout:ReceiptLayoutConfig,layer:ReceiptLayer):TicketTextStyle{
+export function receiptLayerStyle(layout:ReceiptLayoutConfig,layer:ReceiptLayer):ReceiptLayerStyle{
  const explicit=layout.layer_styles?.[layer]??{},font=explicit.font??layout.font;
  return {font,size:'normal',bold:layer==='total'||layer==='partial_title',align:['header','table','timestamp','footer'].includes(receiptLayerSection(layer))?'center':'left',space_after:0,...explicit,...(!receiptUsesRaster(layout)&&['ayce','extras','cover','discount','total','payment','residual'].includes(layer)?{align:'left' as const}:{}),size_pt:explicit.size_pt??layout.sizes_pt?.[receiptLayerSection(layer)]??(font==='B'?9:12)};
 }
@@ -118,19 +167,22 @@ export function normalizeReceiptLayout(raw: unknown): ReceiptLayoutConfig {
   const labels:ReceiptLayoutConfig['labels']={};
   const layerStyles:NonNullable<ReceiptLayoutConfig['layer_styles']>={};
   const rawStyles=r.layer_styles&&typeof r.layer_styles==='object'?r.layer_styles as Record<string,unknown>:{};
-  for(const key of RECEIPT_LAYER_ORDER){const raw=rawStyles[key];if(!raw||typeof raw!=='object'||Array.isArray(raw))continue;const value=raw as Record<string,unknown>,style:Partial<TicketTextStyle>={};
+  for(const key of RECEIPT_LAYER_ORDER){const raw=rawStyles[key];if(!raw||typeof raw!=='object'||Array.isArray(raw))continue;const value=raw as Record<string,unknown>,style:Partial<ReceiptLayerStyle>={};
     if(value.font==='A'||value.font==='B')style.font=value.font;
     if(value.size==='normal'||value.size==='double')style.size=value.size;
     if(typeof value.bold==='boolean')style.bold=value.bold;
     if(value.align==='left'||value.align==='center'||value.align==='right')style.align=value.align;
     if(value.space_after===0||value.space_after===1||value.space_after===2)style.space_after=value.space_after;
     if(typeof value.size_pt==='number'&&Number.isFinite(value.size_pt)&&value.size_pt>=4&&value.size_pt<=72)style.size_pt=Math.round(value.size_pt*10)/10;
+    if(typeof value.separator_after==='boolean')style.separator_after=value.separator_after;
+    if(typeof value.separator_before==='boolean')style.separator_before=value.separator_before;
     if(Object.keys(style).length)layerStyles[key]=style;
   }
   for(const key of ['disclaimer','total','payment','residual','non_fiscal'] as const){const value=(r.labels as Record<string,unknown>|undefined)?.[key];if(typeof value==='string'&&value.trim())labels[key]=partialText(value,'');}
 
   return {
     ...(Object.keys(layerStyles).length?{layer_styles:layerStyles}:{}),
+    ...(r.separators==='sections'||r.separators==='none'?{separators:r.separators}:{}),
     ...(Object.keys(labels).length?{labels}:{}),
     ...(Array.isArray(r.layer_order)?{layer_order:[...new Set([...r.layer_order.filter((key):key is ReceiptLayer=>RECEIPT_LAYER_ORDER.includes(key as ReceiptLayer)),...RECEIPT_LAYER_ORDER])]}:{}),
     ...(Array.isArray(r.hidden_layers)?{hidden_layers:[...new Set(r.hidden_layers.filter((key):key is ReceiptLayer=>RECEIPT_LAYER_ORDER.includes(key as ReceiptLayer)&&key!=='discount'))]}:{}),
@@ -561,6 +613,94 @@ export function renderNonFiscalReceiptTicket(
       ordered.push(...rows);
     }
     lines=ordered;
+  }
+  const hasSeparatorOverrides = Object.values(layout.layer_styles ?? {}).some(
+    style => typeof style?.separator_after === 'boolean' || typeof style?.separator_before === 'boolean',
+  );
+  if (layout.separators === 'sections' || layout.separators === 'none' || hasSeparatorOverrides) {
+    const makeSep = (owner?: ReceiptLayer): AnnotatedLine => ({
+      text: sepChar.repeat(width),
+      type: 'separator',
+      size: 'normal',
+      bold: false,
+      align: 'left',
+      font: layout.font,
+      ...(rasterMode
+        ? { size_pt: layout.sizes_pt?.items ?? (layout.font === 'B' ? 9 : 12), section: 'items' as const }
+        : { cell_dots: metric.cell, glyph_dots: metric.glyph }),
+      ...(owner ? { preview_layer: owner } : {}),
+    });
+    const proofCount = payload.layout_test === true ? 3 : 0;
+    const proof = lines.slice(0, proofCount);
+    const body = lines.slice(proofCount);
+    if (layout.separators === 'sections' || layout.separators === 'none') {
+      const contentOnly = body.filter(
+        line => line.preview_layer && line.type !== 'separator' && !layout.hidden_layers?.includes(line.preview_layer as ReceiptLayer),
+      );
+      const order = layout.layer_order ?? RECEIPT_LAYER_ORDER;
+      const visibleLayers: Array<{ key: ReceiptLayer; rows: AnnotatedLine[] }> = [];
+      for (const key of order) {
+        const rows = contentOnly.filter(line => line.preview_layer === key);
+        if (rows.some(line => line.type !== 'blank')) visibleLayers.push({ key, rows });
+      }
+      const assembled: AnnotatedLine[] = [...proof];
+      visibleLayers.forEach((entry, idx) => {
+        if (idx === 0 && layout.layer_styles?.[entry.key]?.separator_before === true) {
+          assembled.push(makeSep(entry.key));
+        }
+        assembled.push(...entry.rows);
+        const next = visibleLayers[idx + 1];
+        const explicit = layout.layer_styles?.[entry.key]?.separator_after;
+        const want = next
+          ? (explicit ?? (layout.separators === 'sections' && receiptSeparatorGroup(entry.key) !== receiptSeparatorGroup(next.key)))
+          : explicit === true;
+        if (want) assembled.push(makeSep(entry.key));
+      });
+      lines = assembled;
+    } else {
+      // Legacy ('all') mode with selective per-layer separator overrides.
+      const leadingSeps: AnnotatedLine[] = [];
+      const runs: Array<{ key: ReceiptLayer; rows: AnnotatedLine[]; trailingSeps: AnnotatedLine[] }> = [];
+      for (const line of body) {
+        if (line.type === 'separator') {
+          if (runs.length === 0) leadingSeps.push(line);
+          else runs[runs.length - 1].trailingSeps.push(line);
+        } else if (line.type === 'blank') {
+          if (runs.length > 0) runs[runs.length - 1].rows.push(line);
+        } else {
+          const key = line.preview_layer as ReceiptLayer | undefined;
+          if (!key) continue;
+          const last = runs[runs.length - 1];
+          if (last && last.key === key && last.trailingSeps.length === 0) {
+            last.rows.push(line);
+          } else {
+            runs.push({ key, rows: [line], trailingSeps: [] });
+          }
+        }
+      }
+      const assembled: AnnotatedLine[] = [...proof];
+      if (runs.length > 0) {
+        const firstBefore = layout.layer_styles?.[runs[0].key]?.separator_before;
+        if (firstBefore === true) {
+          assembled.push(...(leadingSeps.length ? leadingSeps : [makeSep(runs[0].key)]));
+        } else if (firstBefore !== false) {
+          assembled.push(...leadingSeps);
+        }
+      }
+      runs.forEach((run, idx) => {
+        assembled.push(...run.rows);
+        const isLast = idx === runs.length - 1;
+        const after = layout.layer_styles?.[run.key]?.separator_after;
+        if (after === false) {
+          // explicitly hidden
+        } else if (after === true) {
+          assembled.push(...(run.trailingSeps.length ? run.trailingSeps : [makeSep(run.key)]));
+        } else if (!isLast || run.trailingSeps.length) {
+          assembled.push(...run.trailingSeps);
+        }
+      });
+      lines = assembled;
+    }
   }
   const text = lines.map((l) => l.right_text ? `${l.text}  ${l.right_text}` : l.text).join("\n");
   const htmlLines = lines
