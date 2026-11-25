@@ -40,6 +40,8 @@ export interface ReceiptLayoutConfig {
     show_table_bill?: boolean;
     /** With the table bill: print "Totale tavolo" and "Diviso N" (default true). */
     show_table_total?: boolean;
+    /** Share receipts: each table item reduced to this guest's part ("1/4" or "x0,25"). */
+    share_items?: 'fraction' | 'decimal';
   };
   total: {
     visible: boolean;
@@ -212,6 +214,7 @@ export function normalizeReceiptLayout(raw: unknown): ReceiptLayoutConfig {
       show_extra_details: it.show_extra_details !== false,
       ...(it.show_table_bill === true ? { show_table_bill: true } : {}),
       ...(it.show_table_total === false ? { show_table_total: false } : {}),
+      ...(it.share_items === 'fraction' || it.share_items === 'decimal' ? { share_items: it.share_items } : {}),
     },
     total: {
       visible: tot.visible !== false,
@@ -476,7 +479,11 @@ export function renderNonFiscalReceiptTicket(
   const saldoAfterPayments = paymentScope === 'full_total' && tableBill !== null && paidBefore > 0;
   const shareReceipt = paymentScope === 'roman_split' && romanShareGross > 0;
   // Default: a share (or a saldo after shares) shows only what this guest pays.
-  const detailedBill = Boolean(tableBill && layout.items.show_table_bill);
+  // Share items: every table item reduced to the paid shares (needs equal shares).
+  const shareRatioOk = Boolean(tableBill && billCovers > 0 && shareReceipt
+    && Math.abs(Math.round(cents(tableBill.total) * personsAtPayment / billCovers) - cents(romanShareGross)) <= personsAtPayment);
+  const shareItems = Boolean(layout.items.share_items && shareRatioOk);
+  const detailedBill = Boolean(tableBill && (layout.items.show_table_bill || shareItems));
   const compactShare = (shareReceipt || saldoAfterPayments) && !detailedBill;
   if ((shareReceipt || saldoAfterPayments) && (layout.items.show_ayce || layout.items.show_extras || layout.items.show_cover)) {
     layer='extras';
@@ -484,7 +491,36 @@ export function renderNonFiscalReceiptTicket(
     const shareWord = personsAtPayment === 1 ? 'quota' : 'quote';
     const title = saldoAfterPayments ? (preBill ? 'Conto da saldare' : 'Saldo conto')
       : `${preBill ? 'Conto' : 'Pagamento'} ${personsAtPayment} ${shareWord}${billCovers >= personsAtPayment ? ` su ${billCovers}` : ''}`;
-    if (tableBill && detailedBill) {
+    if (tableBill && shareItems) {
+      layer='share_title';
+      previewField = 'share_title';
+      addLine(title, 'item', 'items', true);
+      const gcd = (a: number, b: number): number => b ? gcd(b, a % b) : a;
+      const target = cents(romanShareGross);
+      const amounts = tableBill.lines.map(line => Math.floor(cents(line.line_total) * personsAtPayment / billCovers));
+      let rest = target - amounts.reduce((sum, value) => sum + value, 0);
+      for (let index = 0; rest > 0 && index < amounts.length * 2; index++, rest--) amounts[index % amounts.length] += 1;
+      tableBill.lines.forEach((line, index) => {
+        const kind = line.kind === 'ayce' ? 'ayce' : line.kind === 'cover' ? 'cover' : 'extras';
+        if (kind === 'ayce' ? !layout.items.show_ayce : kind === 'cover' ? !layout.items.show_cover : !layout.items.show_extras) return;
+        layer = kind;
+        previewField = kind;
+        const numerator = line.quantity * personsAtPayment;
+        const unit = Number.isFinite(line.unit_price) && Number(line.unit_price) > 0 ? money(line.unit_price) : null;
+        const name = toStr(line.name).trim();
+        let label: string;
+        if (numerator % billCovers === 0) {
+          const whole = numerator / billCovers;
+          label = `${whole}x ${name}${whole > 1 && unit ? ` (${unit})` : ''}`;
+        } else if (layout.items.share_items === 'decimal') {
+          label = `${name} (${unit ? `${unit} ` : ''}x${String(Math.round(numerator / billCovers * 100) / 100).replace('.', ',')})`;
+        } else {
+          const divisor = gcd(numerator, billCovers);
+          label = `${numerator / divisor}/${billCovers / divisor} ${name}${unit ? ` (${unit})` : ''}`;
+        }
+        addAmount(label, money(amounts[index] / 100));
+      });
+    } else if (tableBill && detailedBill) {
       layer='share_title';
       previewField = 'share_title';
       addLine(title, 'item', 'items', true);
@@ -561,7 +597,7 @@ export function renderNonFiscalReceiptTicket(
   layer='total';
   previewField = 'total';
   if (layout.total.visible) {
-    const totalLabel = layout.labels?.total ?? (shareReceipt && detailedBill ? (preBill ? 'QUOTA' : 'QUOTA PAGATA') : 'TOTALE');
+    const totalLabel = layout.labels?.total ?? (shareReceipt && detailedBill && !shareItems ? (preBill ? 'QUOTA' : 'QUOTA PAGATA') : 'TOTALE');
     addLine(totalLabel, 'item', 'total', true, money(totalAmount));
     layer='payment';
   previewField = 'payment';
